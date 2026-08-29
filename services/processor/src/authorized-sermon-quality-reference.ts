@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import OpenAI, { toFile } from 'openai';
@@ -125,45 +125,86 @@ if (englishTranslation.length > 1_200)
   throw new Error('Translation exceeds the voice-worker limit.');
 
 const renderStartedAt = Date.now();
-const renderResponse = await fetch(new URL('/v1/render', voiceWorkerUrl), {
-  method: 'POST',
-  headers: {
-    authorization: `Bearer ${voiceWorkerToken}`,
-    'content-type': 'application/json',
-  },
-  body: JSON.stringify({
-    text: englishTranslation,
-    language: 'en',
-    profileId,
-    sourceStartMs: 0,
-    sourceEndMs: sourceDurationMs,
-    sequence: 0,
-    exaggeration: 0.5,
-    cfgWeight: 0.35,
-  }),
-  signal: AbortSignal.timeout(120_000),
-});
-if (!renderResponse.ok) {
-  throw new Error(
-    `Voice worker failed with ${renderResponse.status}: ${await renderResponse.text()}`,
-  );
+const sentences =
+  englishTranslation.match(/[^.!?]+(?:[.!?]+|$)/g)?.map((sentence) => sentence.trim()) ?? [];
+if (sentences.length === 0 || sentences.join(' ') !== englishTranslation) {
+  throw new Error('Could not split the translation into complete render sentences.');
 }
-if (renderResponse.headers.get('x-renderer') !== 'chatterbox-multilingual-v3') {
-  throw new Error('Voice worker did not return the required cloned renderer.');
+const renderedChunks: Buffer[] = [];
+const renderChunks: Array<{
+  sequence: number;
+  text: string;
+  renderMs: number;
+  durationMs: number;
+}> = [];
+const pause = Buffer.alloc(Math.round(48_000 * 2 * 0.25));
+for (const [sequence, sentence] of sentences.entries()) {
+  const chunkStartedAt = Date.now();
+  const response = await fetch(new URL('/v1/render', voiceWorkerUrl), {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${voiceWorkerToken}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({
+      text: sentence,
+      language: 'en',
+      profileId,
+      sourceStartMs: Math.round((sourceDurationMs * sequence) / sentences.length),
+      sourceEndMs: Math.round((sourceDurationMs * (sequence + 1)) / sentences.length),
+      sequence,
+      exaggeration: 0.5,
+      cfgWeight: 0.35,
+    }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  if (!response.ok) {
+    throw new Error(`Voice worker failed with ${response.status}: ${await response.text()}`);
+  }
+  if (response.headers.get('x-renderer') !== 'chatterbox-multilingual-v3') {
+    throw new Error('Voice worker did not return the required cloned renderer.');
+  }
+  const chunk = Buffer.from(await response.arrayBuffer());
+  if (chunk.byteLength === 0)
+    throw new Error(`Voice worker returned empty audio for sentence ${sequence}.`);
+  renderedChunks.push(chunk);
+  if (sequence < sentences.length - 1) renderedChunks.push(pause);
+  renderChunks.push({
+    sequence,
+    text: sentence,
+    renderMs: Date.now() - chunkStartedAt,
+    durationMs: Math.round((chunk.byteLength / 2 / 48_000) * 1_000),
+  });
 }
-const renderedPcm = Buffer.from(await renderResponse.arrayBuffer());
+const renderedPcm = Buffer.concat(renderedChunks);
 const renderCompletedAt = Date.now();
-const renderedDurationMs = Math.round((renderedPcm.byteLength / 2 / 48_000) * 1_000);
-if (renderedPcm.byteLength === 0) throw new Error('Voice worker returned empty audio.');
 
 await mkdir(outputDirectory, { recursive: true });
-const renderedWav = wavFromPcmMono(renderedPcm, 48_000);
+const rawWavPath = join(outputDirectory, 'translated-en-cloned-raw.wav');
 const wavPath = join(outputDirectory, 'translated-en-cloned.wav');
 const opusPath = join(outputDirectory, 'translated-en-cloned.opus');
 await Promise.all([
   writeFile(join(outputDirectory, 'source-ru.wav'), fixture, { mode: 0o600 }),
-  writeFile(wavPath, renderedWav, { mode: 0o600 }),
+  writeFile(rawWavPath, wavFromPcmMono(renderedPcm, 48_000), { mode: 0o600 }),
 ]);
+await execFileAsync('ffmpeg', [
+  '-hide_banner',
+  '-loglevel',
+  'error',
+  '-y',
+  '-i',
+  rawWavPath,
+  '-af',
+  'loudnorm=I=-16:TP=-1.5:LRA=7',
+  '-ar',
+  '48000',
+  '-ac',
+  '1',
+  '-c:a',
+  'pcm_s16le',
+  wavPath,
+]);
+await unlink(rawWavPath);
 await execFileAsync('ffmpeg', [
   '-hide_banner',
   '-loglevel',
@@ -177,7 +218,11 @@ await execFileAsync('ffmpeg', [
   '48k',
   opusPath,
 ]);
+const renderedWav = await readFile(wavPath);
 const renderedOpus = await readFile(opusPath);
+const renderedDurationMs = Math.round(
+  (pcmDataFromWav(renderedWav).byteLength / 2 / 48_000) * 1_000,
+);
 
 const report = {
   generatedAt: new Date().toISOString(),
@@ -186,7 +231,7 @@ const report = {
   models: {
     transcription: transcriptionModel,
     translation: translationModel,
-    speechRenderer: renderResponse.headers.get('x-renderer'),
+    speechRenderer: 'chatterbox-multilingual-v3',
   },
   timing: {
     transcriptionMs: transcriptionCompletedAt - transcriptionStartedAt,
@@ -194,6 +239,7 @@ const report = {
     clonedRenderMs: renderCompletedAt - renderStartedAt,
     totalAfterFileReadyMs: renderCompletedAt - transcriptionStartedAt,
     renderedDurationMs,
+    renderChunks,
   },
   text: { sourceTranscript, englishTranslation },
   translationUsage: translationResponse.usage,
