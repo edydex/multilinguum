@@ -21,7 +21,7 @@ interface WorkletFrame {
 
 type PcmListener = (frame: CapturedPcmFrame) => void;
 
-export function useAudioMeter(selectedDeviceId?: string) {
+export function useAudioMeter(selectedDeviceId: string | undefined, enabled: boolean) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [levelDb, setLevelDb] = useState(-60);
   const [activeChannel, setActiveChannel] = useState(0);
@@ -30,12 +30,42 @@ export function useAudioMeter(selectedDeviceId?: string) {
   const [error, setError] = useState<string>();
   const listeners = useRef(new Set<PcmListener>());
 
+  useEffect(() => {
+    let cancelled = false;
+    const refreshDevices = async () => {
+      const available = await navigator.mediaDevices.enumerateDevices();
+      if (cancelled) return;
+      setDevices(
+        available
+          .filter((device) => device.kind === 'audioinput')
+          .map((device, index) => ({
+            id: device.deviceId,
+            label: device.label || `Input ${index + 1}`,
+          })),
+      );
+    };
+    const handleDeviceChange = () => void refreshDevices();
+    void refreshDevices();
+    navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
+    return () => {
+      cancelled = true;
+      navigator.mediaDevices.removeEventListener('devicechange', handleDeviceChange);
+    };
+  }, []);
+
   const subscribePcm = useCallback((listener: PcmListener) => {
     listeners.current.add(listener);
     return () => listeners.current.delete(listener);
   }, []);
 
   useEffect(() => {
+    if (!enabled) {
+      setLevelDb(-60);
+      setActiveChannel(0);
+      setChannelCount(0);
+      setError(undefined);
+      return;
+    }
     let cancelled = false;
     let stream: MediaStream | undefined;
     let context: AudioContext | undefined;
@@ -105,7 +135,7 @@ export function useAudioMeter(selectedDeviceId?: string) {
       stream?.getTracks().forEach((track) => track.stop());
       void context?.close();
     };
-  }, [selectedDeviceId]);
+  }, [enabled, selectedDeviceId]);
 
   return {
     devices,

@@ -95,11 +95,14 @@ export function App() {
   const [preflight, setPreflight] = useState<Record<string, unknown>>();
   const [source, setSource] = useState<'en' | 'ru'>('ru');
   const [targets, setTargets] = useState(() => initialTargets('ru'));
-  const [selectedDeviceId, setSelectedDeviceId] = useState<string>();
+  const [selectedDeviceId, setSelectedDeviceId] = useState<string | undefined>(
+    () => localStorage.getItem('audioDeviceId') || undefined,
+  );
+  const [inputEnabled, setInputEnabled] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [playbackUrl, setPlaybackUrl] = useState<string>();
-  const audio = useAudioMeter(selectedDeviceId);
+  const audio = useAudioMeter(selectedDeviceId, inputEnabled);
   const {
     devices,
     levelDb,
@@ -157,6 +160,11 @@ export function App() {
       setConnected,
     );
   }, [baseUrl, connection, refresh, token]);
+
+  useEffect(() => {
+    if (selectedDeviceId) localStorage.setItem('audioDeviceId', selectedDeviceId);
+    else localStorage.removeItem('audioDeviceId');
+  }, [selectedDeviceId]);
 
   useEffect(
     () => () => {
@@ -404,7 +412,7 @@ export function App() {
               </div>
               <button
                 className={`start-button ${live ? 'stop' : ''}`}
-                disabled={busy}
+                disabled={busy || (!live && !inputEnabled)}
                 onClick={() => void (live ? stop() : start())}
               >
                 <span>{live ? '■' : '▶'}</span>
@@ -425,7 +433,8 @@ export function App() {
                     <h2>Mixer feed</h2>
                   </div>
                   <span className="ok">
-                    {capture.streaming ? 'Streaming' : 'Ready'} · 48 kHz mono · shared input
+                    {capture.streaming ? 'Streaming' : inputEnabled ? 'Monitoring' : 'Input off'} ·
+                    48 kHz mono · shared input
                   </span>
                 </div>
                 <label>
@@ -433,7 +442,10 @@ export function App() {
                   <select
                     disabled={live}
                     value={selectedDeviceId ?? ''}
-                    onChange={(event) => setSelectedDeviceId(event.target.value || undefined)}
+                    onChange={(event) => {
+                      setInputEnabled(false);
+                      setSelectedDeviceId(event.target.value || undefined);
+                    }}
                   >
                     <option value="">System default</option>
                     {devices.map((device) => (
@@ -443,6 +455,14 @@ export function App() {
                     ))}
                   </select>
                 </label>
+                {(!live || !inputEnabled) && (
+                  <button
+                    className="secondary"
+                    onClick={() => setInputEnabled((current) => (live ? true : !current))}
+                  >
+                    {inputEnabled ? 'Disable input monitor' : 'Enable selected input'}
+                  </button>
+                )}
                 <div className="meter" aria-label={`Input level ${levelDb.toFixed(1)} dBFS`}>
                   <span style={{ width: `${Math.max(1, dbToMeterPercent(levelDb))}%` }} />
                 </div>
@@ -454,12 +474,17 @@ export function App() {
                   <span>0 dB</span>
                 </div>
                 <p className="field-note">
-                  {Math.round(sampleRate / 1_000)} kHz device ·{' '}
-                  {channelCount > 1
-                    ? `using channel ${activeChannel + 1} of ${channelCount}`
-                    : 'single input channel'}
-                  . Multilinguum opens one shared read-only capture stream; OBS may use the same
-                  device.
+                  {inputEnabled ? (
+                    <>
+                      {Math.round(sampleRate / 1_000)} kHz device ·{' '}
+                      {channelCount > 1
+                        ? `using channel ${activeChannel + 1} of ${channelCount}`
+                        : 'single input channel'}
+                      . One shared read-only stream is open; OBS may use the same device.
+                    </>
+                  ) : (
+                    'Choose the device first, then enable it. Multilinguum will not open or switch an input automatically.'
+                  )}
                 </p>
               </section>
 
