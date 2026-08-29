@@ -31,6 +31,11 @@ interface TimingState {
   transcript: string;
 }
 
+interface AlignedTimingState {
+  arrivalLagMs: number[];
+  firstFrameElapsedMs?: number;
+}
+
 class RealtimeConnection {
   readonly socket: WebSocket;
   readonly eventCounts = new Map<string, number>();
@@ -109,7 +114,7 @@ function appendDelta(state: TimingState, event: RealtimeEvent, now: number): voi
   if (typeof event.delta === 'string') state.transcript += event.delta;
 }
 
-function wavFromPcm24kMono(pcm: Buffer): Buffer {
+function wavFromPcmMono(pcm: Buffer, sampleRate: number): Buffer {
   const header = Buffer.alloc(44);
   header.write('RIFF', 0);
   header.writeUInt32LE(36 + pcm.byteLength, 4);
@@ -118,13 +123,49 @@ function wavFromPcm24kMono(pcm: Buffer): Buffer {
   header.writeUInt32LE(16, 16);
   header.writeUInt16LE(1, 20);
   header.writeUInt16LE(1, 22);
-  header.writeUInt32LE(24_000, 24);
-  header.writeUInt32LE(48_000, 28);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28);
   header.writeUInt16LE(2, 32);
   header.writeUInt16LE(16, 34);
   header.write('data', 36);
   header.writeUInt32LE(pcm.byteLength, 40);
   return Buffer.concat([header, pcm]);
+}
+
+function recordAlignment(
+  state: AlignedTimingState,
+  event: RealtimeEvent,
+  now: number,
+  streamStartedAt: number,
+): void {
+  if (streamStartedAt === 0 || typeof event.elapsed_ms !== 'number') return;
+  if (state.firstFrameElapsedMs === undefined) state.firstFrameElapsedMs = event.elapsed_ms;
+  state.arrivalLagMs.push(now - streamStartedAt - event.elapsed_ms);
+}
+
+function percentile(values: readonly number[], quantile: number): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * quantile))];
+}
+
+function alignmentSummary(state: AlignedTimingState) {
+  return {
+    samples: state.arrivalLagMs.length,
+    firstFrameElapsedMs: state.firstFrameElapsedMs,
+    arrivalLagP50Ms: percentile(state.arrivalLagMs, 0.5),
+    arrivalLagP95Ms: percentile(state.arrivalLagMs, 0.95),
+  };
+}
+
+function trailingSilenceMs(pcm: Buffer, sampleRate: number): number {
+  const threshold = 184; // Approximately -45 dBFS for signed 16-bit PCM.
+  for (let offset = pcm.byteLength - 2; offset >= 0; offset -= 2) {
+    if (Math.abs(pcm.readInt16LE(offset)) > threshold) {
+      return Math.round(((pcm.byteLength - offset - 2) / 2 / sampleRate) * 1_000);
+    }
+  }
+  return Math.round((pcm.byteLength / 2 / sampleRate) * 1_000);
 }
 
 function elapsed(startedAt: number, instant?: number): number | undefined {
@@ -174,20 +215,32 @@ const transcriptionClientSecret = await client.realtime.clientSecrets.create({
 const translationInput: TimingState = { transcript: '' };
 const translationOutput: TimingState = { transcript: '' };
 const liveTranscription: TimingState = { transcript: '' };
+const translationInputAlignment: AlignedTimingState = { arrivalLagMs: [] };
+const translationOutputAlignment: AlignedTimingState = { arrivalLagMs: [] };
+const translationAudioAlignment: AlignedTimingState = { arrivalLagMs: [] };
 const translatedAudioChunks: Buffer[] = [];
 let firstTranslatedAudioAt: number | undefined;
 let translationClosedAt: number | undefined;
 let sourceStreamCompletedAt: number | undefined;
+let streamStartedAt = 0;
+let translatedSampleRate = 24_000;
 
 const translation = new RealtimeConnection(
   `wss://api.openai.com/v1/realtime/translations?model=${encodeURIComponent(translationModel)}`,
   (event) => {
     const now = Date.now();
-    if (event.type === 'session.input_transcript.delta') appendDelta(translationInput, event, now);
-    if (event.type === 'session.output_transcript.delta')
+    if (event.type === 'session.input_transcript.delta') {
+      appendDelta(translationInput, event, now);
+      recordAlignment(translationInputAlignment, event, now, streamStartedAt);
+    }
+    if (event.type === 'session.output_transcript.delta') {
       appendDelta(translationOutput, event, now);
+      recordAlignment(translationOutputAlignment, event, now, streamStartedAt);
+    }
     if (event.type === 'session.output_audio.delta' && typeof event.delta === 'string') {
       if (firstTranslatedAudioAt === undefined) firstTranslatedAudioAt = now;
+      if (typeof event.sample_rate === 'number') translatedSampleRate = event.sample_rate;
+      recordAlignment(translationAudioAlignment, event, now, streamStartedAt);
       translatedAudioChunks.push(Buffer.from(event.delta, 'base64'));
     }
     if (event.type === 'session.closed') translationClosedAt = now;
@@ -212,11 +265,16 @@ await Promise.all([translation.open(), transcription.open()]);
 const translationUpdated = translation.waitFor('session.updated');
 translation.send({
   type: 'session.update',
-  session: { audio: { output: { language: targetLanguage } } },
+  session: {
+    audio: {
+      input: { transcription: { model: transcriptionModel } },
+      output: { language: targetLanguage },
+    },
+  },
 });
 await translationUpdated;
 
-const streamStartedAt = Date.now();
+streamStartedAt = Date.now();
 const bytesPer20Ms = 24_000 * 2 * 0.02;
 for (let offset = 0; offset < sourcePcm.byteLength; offset += bytesPer20Ms) {
   const audio = sourcePcm
@@ -241,7 +299,10 @@ await Promise.all([translationClosed, transcriptionCompleted]);
 transcription.close();
 
 const translatedPcm = Buffer.concat(translatedAudioChunks);
-const translatedDurationMs = Math.round((translatedPcm.byteLength / 2 / 24_000) * 1_000);
+const translatedDurationMs = Math.round(
+  (translatedPcm.byteLength / 2 / translatedSampleRate) * 1_000,
+);
+const translatedTrailingSilenceMs = trailingSilenceMs(translatedPcm, translatedSampleRate);
 const firstInputTranscriptMs = elapsed(streamStartedAt, translationInput.firstDeltaAt);
 const firstOutputTranscriptMs = elapsed(streamStartedAt, translationOutput.firstDeltaAt);
 const firstOutputAudioMs = elapsed(streamStartedAt, firstTranslatedAudioAt);
@@ -281,9 +342,17 @@ const report = {
       sourceStreamCompletedAt === undefined || translationClosedAt === undefined
         ? undefined
         : translationClosedAt - sourceStreamCompletedAt,
+    alignment: {
+      translationInputTranscript: alignmentSummary(translationInputAlignment),
+      translationOutputTranscript: alignmentSummary(translationOutputAlignment),
+      translationAudio: alignmentSummary(translationAudioAlignment),
+    },
   },
   output: {
     translatedDurationMs,
+    translatedSampleRate,
+    translatedTrailingSilenceMs,
+    translatedAudibleEndMs: translatedDurationMs - translatedTrailingSilenceMs,
     translatedBytes: translatedPcm.byteLength,
     liveTranscript: liveTranscription.transcript.trim(),
     translationInputTranscript: translationInput.transcript.trim(),
@@ -297,10 +366,10 @@ const report = {
 
 await mkdir(outputDirectory, { recursive: true });
 await Promise.all([
-  writeFile(join(outputDirectory, 'source-ru.wav'), wavFromPcm24kMono(sourcePcm)),
+  writeFile(join(outputDirectory, 'source-ru.wav'), wavFromPcmMono(sourcePcm, 24_000)),
   writeFile(
     join(outputDirectory, `translated-${targetLanguage}.wav`),
-    wavFromPcm24kMono(translatedPcm),
+    wavFromPcmMono(translatedPcm, translatedSampleRate),
   ),
   writeFile(join(outputDirectory, 'report.json'), `${JSON.stringify(report, null, 2)}\n`, {
     mode: 0o600,
