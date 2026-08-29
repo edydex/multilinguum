@@ -272,7 +272,10 @@ export async function buildServer(config: ProcessorConfig) {
         if (packet.byteLength !== 16 + sampleCount * 2 || sampleCount > 48_000) {
           throw new Error('Capture frame length is invalid.');
         }
-        pipeline.push(new Uint8Array(packet.buffer, packet.byteOffset + 16, sampleCount * 2));
+        pipeline.push(
+          new Uint8Array(packet.buffer, packet.byteOffset + 16, sampleCount * 2),
+          capturedAt,
+        );
       } catch (error) {
         socket.close(1003, error instanceof Error ? error.message : 'Invalid capture frame');
       }
@@ -344,6 +347,18 @@ export async function buildServer(config: ProcessorConfig) {
         .header('content-type', 'application/x-ndjson; charset=utf-8')
         .header('content-disposition', `attachment; filename="${transcript.filename}"`)
         .send(transcript.data);
+    },
+  );
+  app.get(
+    '/api/archives/:sessionId/latency',
+    { preHandler: requireControl },
+    async (request, reply) => {
+      const { sessionId } = request.params as { sessionId: string };
+      const report = await archive.readLatency(sessionId);
+      return reply
+        .header('content-type', 'application/x-ndjson; charset=utf-8')
+        .header('content-disposition', `attachment; filename="${report.filename}"`)
+        .send(report.data);
     },
   );
   app.post('/api/archives/:sessionId/retain', { preHandler: requireControl }, async (request) => {

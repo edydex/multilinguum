@@ -5,15 +5,19 @@ import type {
   ChannelConfig,
   ChannelHealth,
   MediaRelay,
+  LatencySpan,
+  PipelineLatencySample,
   ProcessorEvent,
   ServiceSession,
   SpeechRenderer,
+  SourceProcessingTiming,
   TranscriptSegment,
   TranslationProvider,
   VoiceProfile,
 } from '@multilinguum/protocol';
 import { createSessionSchema, estimateCloudServiceCost } from '@multilinguum/protocol';
 import { defaultGlossary } from './glossary.js';
+import { buildLatencyBreakdown, summarizeLatency } from './latency.js';
 import type { VoiceProfileStore } from './voice-profile-store.js';
 
 export interface SessionEngineDependencies {
@@ -33,12 +37,14 @@ interface RuntimeChannel {
   health: ChannelHealth;
   effectiveVoiceMode: 'source' | 'natural' | 'cloned';
   precedingText: string[];
+  latencySamples: PipelineLatencySample[];
 }
 
 export class SessionEngine {
   readonly #dependencies: SessionEngineDependencies;
   #session?: ServiceSession;
   readonly #channels = new Map<string, RuntimeChannel>();
+  readonly #sourceAudioSpans = new Map<number, LatencySpan>();
 
   constructor(dependencies: SessionEngineDependencies) {
     this.#dependencies = dependencies;
@@ -102,11 +108,13 @@ export class SessionEngine {
     };
     this.#session = session;
     this.#channels.clear();
+    this.#sourceAudioSpans.clear();
     for (const config of targets) {
       this.#channels.set(config.id, {
         config,
         effectiveVoiceMode: config.voiceMode,
         precedingText: [],
+        latencySamples: [],
         health: {
           channelId: config.id,
           targetLanguage: config.targetLanguage,
@@ -167,6 +175,7 @@ export class SessionEngine {
     sourceEndMs: number;
     final: boolean;
     sequence: number;
+    timing?: SourceProcessingTiming | undefined;
   }): Promise<TranscriptSegment[]> {
     const session = this.#requiredSession();
     if (session.state !== 'live') throw new Error('Session is not live.');
@@ -182,9 +191,13 @@ export class SessionEngine {
       final: input.final,
       sequence: input.sequence,
     };
+    const sourceAudioSpan = this.#sourceAudioSpans.get(input.sequence);
     const results = await Promise.all(
-      [...this.#channels.values()].map((channel) => this.#processChannel(source, channel)),
+      [...this.#channels.values()].map((channel) =>
+        this.#processChannel(source, channel, input.timing, sourceAudioSpan),
+      ),
     );
+    this.#sourceAudioSpans.delete(input.sequence);
     return results.filter((segment): segment is TranscriptSegment => Boolean(segment));
   }
 
@@ -194,6 +207,7 @@ export class SessionEngine {
     endMs: number;
     sequence: number;
     language: 'en' | 'ru';
+    timing?: SourceProcessingTiming | undefined;
   }): Promise<void> {
     const session = this.#requiredSession();
     if (session.state !== 'live') throw new Error('Session is not live.');
@@ -212,7 +226,13 @@ export class SessionEngine {
       renderer: 'delayed-original',
     };
     await this.#dependencies.archive.appendAudio(sourceChannel.config.id, audio);
+    const publishStartedAtUnixMs = Date.now();
     await this.#dependencies.relay.publishAudio(sourceChannel.config.id, audio);
+    const publishCompletedAtUnixMs = Date.now();
+    this.#sourceAudioSpans.set(input.sequence, {
+      startedAtUnixMs: publishStartedAtUnixMs,
+      completedAtUnixMs: publishCompletedAtUnixMs,
+    });
     const now = new Date().toISOString();
     sourceChannel.health = {
       ...sourceChannel.health,
@@ -279,20 +299,36 @@ export class SessionEngine {
   async #processChannel(
     source: TranscriptSegment,
     runtime: RuntimeChannel,
+    sourceTiming?: SourceProcessingTiming,
+    sourceAudioSpan?: LatencySpan,
   ): Promise<TranscriptSegment | undefined> {
     if (runtime.config.muted) return undefined;
     const session = this.#requiredSession();
+    let translation: LatencySpan | undefined;
+    let speechRender: LatencySpan | undefined;
+    let captionPublish: LatencySpan | undefined;
+    let audioPublish: LatencySpan | undefined;
+    let speechRenderer: string | undefined;
     try {
       let translated: TranscriptSegment;
       if (runtime.config.voiceMode === 'source') {
         translated = { ...source, channelId: runtime.config.id };
+        audioPublish = sourceAudioSpan;
       } else {
-        translated = await this.#translationProvider(runtime.config).translate(source, {
-          sourceLanguage: session.sourceLanguage,
-          targetLanguage: runtime.config.targetLanguage,
-          glossary: defaultGlossary[runtime.config.targetLanguage],
-          precedingText: runtime.precedingText,
-        });
+        const translationStartedAtUnixMs = Date.now();
+        try {
+          translated = await this.#translationProvider(runtime.config).translate(source, {
+            sourceLanguage: session.sourceLanguage,
+            targetLanguage: runtime.config.targetLanguage,
+            glossary: defaultGlossary[runtime.config.targetLanguage],
+            precedingText: runtime.precedingText,
+          });
+        } finally {
+          translation = {
+            startedAtUnixMs: translationStartedAtUnixMs,
+            completedAtUnixMs: Date.now(),
+          };
+        }
         translated = { ...translated, channelId: runtime.config.id, sessionId: session.id };
       }
       runtime.precedingText.push(translated.text);
@@ -308,21 +344,56 @@ export class SessionEngine {
         });
       }
       await this.#dependencies.archive.appendTranscript(translated);
+      const captionStartedAtUnixMs = Date.now();
       await this.#dependencies.relay.publishCaption(translated);
+      captionPublish = {
+        startedAtUnixMs: captionStartedAtUnixMs,
+        completedAtUnixMs: Date.now(),
+      };
       if (runtime.effectiveVoiceMode !== 'source') {
-        const rendered = await this.#render(runtime, translated);
+        const renderStartedAtUnixMs = Date.now();
+        let rendered;
+        try {
+          rendered = await this.#render(runtime, translated);
+        } finally {
+          speechRender = {
+            startedAtUnixMs: renderStartedAtUnixMs,
+            completedAtUnixMs: Date.now(),
+          };
+        }
+        speechRenderer = rendered.renderer;
         await this.#dependencies.archive.appendAudio(runtime.config.id, rendered);
+        const audioStartedAtUnixMs = Date.now();
         await this.#dependencies.relay.publishAudio(runtime.config.id, rendered);
+        audioPublish = {
+          startedAtUnixMs: audioStartedAtUnixMs,
+          completedAtUnixMs: Date.now(),
+        };
       }
+      const sample = this.#latencySample({
+        runtime,
+        source,
+        sourceTiming,
+        translation,
+        speechRender,
+        captionPublish,
+        audioPublish,
+        speechRenderer,
+        outcome: 'complete',
+      });
+      await this.#recordLatency(runtime, sample);
       const now = new Date().toISOString();
+      const measuredLatency =
+        sample.metrics.sourceEndToAudioMs ?? sample.metrics.sourceEndToCaptionMs ?? backlogMs;
       const nextHealth: ChannelHealth = {
         ...runtime.health,
         state: 'healthy',
         lastTranscriptAt: now,
         ...(runtime.effectiveVoiceMode === 'source' ? {} : { lastAudioAt: now }),
-        latencyMs: backlogMs,
+        latencyMs: Math.max(0, measuredLatency),
         backlogMs,
         engine: `${this.#translationProvider(runtime.config).name}+${runtime.effectiveVoiceMode}`,
+        latency: summarizeLatency(runtime.latencySamples),
       };
       delete nextHealth.error;
       runtime.health = nextHealth;
@@ -330,14 +401,39 @@ export class SessionEngine {
       return translated;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      const sample = this.#latencySample({
+        runtime,
+        source,
+        sourceTiming,
+        translation,
+        speechRender,
+        captionPublish,
+        audioPublish,
+        speechRenderer,
+        outcome: 'failed',
+        error: message,
+      });
+      await this.#recordLatency(runtime, sample).catch(() => undefined);
+      const failedLatency =
+        sample.metrics.sourceEndToAudioMs ??
+        sample.metrics.sourceEndToCaptionMs ??
+        runtime.health.latencyMs;
+      const failureHealth = {
+        ...runtime.health,
+        latencyMs: Math.max(0, failedLatency),
+        ...(runtime.latencySamples.length > 0
+          ? { latency: summarizeLatency(runtime.latencySamples) }
+          : {}),
+        error: message,
+      };
       if (
         runtime.effectiveVoiceMode === 'cloned' &&
         runtime.config.fallbackOrder.includes('natural')
       ) {
         runtime.effectiveVoiceMode = 'natural';
-        runtime.health = { ...runtime.health, state: 'degraded', error: message };
+        runtime.health = { ...failureHealth, state: 'degraded' };
       } else {
-        runtime.health = { ...runtime.health, state: 'failed', error: message };
+        runtime.health = { ...failureHealth, state: 'failed' };
       }
       this.#emitHealth(runtime);
       this.#dependencies.broadcast({ type: 'error', scope: runtime.config.id, message });
@@ -352,6 +448,63 @@ export class SessionEngine {
       return this.#dependencies.clonedSpeech.render(segment, profile);
     }
     return this.#naturalRenderer().render(segment);
+  }
+
+  #latencySample(input: {
+    runtime: RuntimeChannel;
+    source: TranscriptSegment;
+    sourceTiming?: SourceProcessingTiming | undefined;
+    translation?: LatencySpan | undefined;
+    speechRender?: LatencySpan | undefined;
+    captionPublish?: LatencySpan | undefined;
+    audioPublish?: LatencySpan | undefined;
+    speechRenderer?: string | undefined;
+    outcome: 'complete' | 'failed';
+    error?: string | undefined;
+  }): PipelineLatencySample {
+    const base = {
+      id: randomUUID(),
+      sessionId: input.source.sessionId,
+      channelId: input.runtime.config.id,
+      language: input.runtime.config.targetLanguage,
+      sequence: input.source.sequence,
+      sourceStartMs: input.source.sourceStartMs,
+      sourceEndMs: input.source.sourceEndMs,
+      recordedAt: new Date().toISOString(),
+      ...(input.sourceTiming?.captureCompletedAtUnixMs !== undefined
+        ? { captureCompletedAtUnixMs: input.sourceTiming.captureCompletedAtUnixMs }
+        : {}),
+      ...(input.sourceTiming?.chunkReadyAtUnixMs !== undefined
+        ? { chunkReadyAtUnixMs: input.sourceTiming.chunkReadyAtUnixMs }
+        : {}),
+      ...(input.sourceTiming?.transcription
+        ? { transcription: input.sourceTiming.transcription }
+        : {}),
+      ...(input.translation ? { translation: input.translation } : {}),
+      ...(input.speechRender ? { speechRender: input.speechRender } : {}),
+      ...(input.captionPublish ? { captionPublish: input.captionPublish } : {}),
+      ...(input.audioPublish ? { audioPublish: input.audioPublish } : {}),
+      engines: {
+        ...(input.sourceTiming?.transcription
+          ? { transcription: input.sourceTiming.transcriptionEngine ?? 'capture-transcriber' }
+          : {}),
+        ...(input.runtime.config.voiceMode !== 'source'
+          ? { translation: this.#translationProvider(input.runtime.config).name }
+          : {}),
+        ...(input.speechRenderer ? { speechRenderer: input.speechRenderer } : {}),
+        relay: this.#dependencies.relay.name,
+      },
+      outcome: input.outcome,
+      ...(input.error ? { error: input.error } : {}),
+    } satisfies Omit<PipelineLatencySample, 'metrics'>;
+    return { ...base, metrics: buildLatencyBreakdown(base) };
+  }
+
+  async #recordLatency(runtime: RuntimeChannel, sample: PipelineLatencySample): Promise<void> {
+    await this.#dependencies.archive.appendLatency(sample);
+    runtime.latencySamples.push(sample);
+    runtime.latencySamples = runtime.latencySamples.slice(-10_000);
+    this.#dependencies.broadcast({ type: 'latency', sample });
   }
 
   #translationProvider(config?: ChannelConfig): TranslationProvider {

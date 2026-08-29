@@ -77,6 +77,8 @@ export const api = {
     requestBlob(connection, `/api/archives/${sessionId}/audio/${channelId}`),
   archiveTranscript: (connection: OperatorConnection, sessionId: string, channelId: string) =>
     requestBlob(connection, `/api/archives/${sessionId}/transcripts/${channelId}`),
+  archiveLatency: (connection: OperatorConnection, sessionId: string) =>
+    requestBlob(connection, `/api/archives/${sessionId}/latency`),
   retain: (connection: OperatorConnection, sessionId: string, retained: boolean) =>
     request<ArchiveManifest>(connection, `/api/archives/${sessionId}/retain`, {
       method: 'POST',

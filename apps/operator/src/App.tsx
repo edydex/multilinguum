@@ -45,6 +45,13 @@ function formatLatency(milliseconds: number): string {
   return milliseconds < 1_000 ? `${milliseconds} ms` : `${(milliseconds / 1_000).toFixed(1)} s`;
 }
 
+function archiveP95Latency(archive: ArchiveManifest): number | undefined {
+  const values = Object.values(archive.latencyReport.channels)
+    .map((summary) => summary.p95.sourceEndToAudioMs ?? summary.p95.sourceEndToCaptionMs)
+    .filter((value): value is number => value !== undefined);
+  return values.length > 0 ? Math.max(...values) : undefined;
+}
+
 export function App() {
   const [tab, setTab] = useState<'service' | 'archives' | 'connection'>('service');
   const [baseUrl, setBaseUrl] = useState(
@@ -140,6 +147,21 @@ export function App() {
       const anchor = document.createElement('a');
       anchor.href = url;
       anchor.download = `${sessionId}-${language}.jsonl`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setError(undefined);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
+
+  const exportLatency = async (sessionId: string) => {
+    try {
+      const blob = await api.archiveLatency(connection, sessionId);
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${sessionId}-latency.jsonl`;
       anchor.click();
       URL.revokeObjectURL(url);
       setError(undefined);
@@ -458,7 +480,22 @@ export function App() {
                       <p className="caption">{caption?.text ?? 'No caption yet'}</p>
                       <div className="metrics">
                         <span>{itemHealth?.listenerCount ?? 0} listeners</span>
-                        <span>{formatLatency(itemHealth?.latencyMs ?? 0)}</span>
+                        <span>E2E {formatLatency(itemHealth?.latencyMs ?? 0)}</span>
+                        {itemHealth?.latency?.p95.transcriptionMs !== undefined && (
+                          <span>
+                            STT p95 {formatLatency(itemHealth.latency.p95.transcriptionMs)}
+                          </span>
+                        )}
+                        {itemHealth?.latency?.p95.translationMs !== undefined && (
+                          <span>
+                            Translate p95 {formatLatency(itemHealth.latency.p95.translationMs)}
+                          </span>
+                        )}
+                        {itemHealth?.latency?.p95.speechRenderMs !== undefined && (
+                          <span>
+                            Voice p95 {formatLatency(itemHealth.latency.p95.speechRenderMs)}
+                          </span>
+                        )}
                         <span>{itemHealth?.state ?? 'idle'}</span>
                       </div>
                       {live && itemHealth && (
@@ -510,73 +547,87 @@ export function App() {
               <button onClick={() => void refresh()}>Refresh</button>
             </div>
             {archives.length === 0 && <div className="empty">No completed services yet.</div>}
-            {archives.map((archive) => (
-              <article className="archive-row" key={archive.sessionId}>
-                <div>
-                  <strong>{new Date(archive.createdAt).toLocaleString()}</strong>
-                  <span>
-                    {archive.audioTracks.length} audio tracks · {archive.transcripts.length}{' '}
-                    transcripts
-                  </span>
-                </div>
-                <div>
-                  <span>
-                    {archive.retained
-                      ? 'Retained'
-                      : `Expires ${new Date(archive.retentionDeadline).toLocaleDateString()}`}
-                  </span>
-                  <code>{archive.integritySha256?.slice(0, 12) ?? 'recording'}</code>
-                </div>
-                <div className="archive-actions">
-                  <button
-                    onClick={() =>
-                      void api
-                        .retain(connection, archive.sessionId, !archive.retained)
-                        .then(refresh)
-                    }
-                  >
-                    {archive.retained ? 'Resume expiry' : 'Retain'}
-                  </button>
-                  <button
-                    className="danger"
-                    onClick={() => {
-                      if (window.confirm('Permanently delete this local archive?'))
-                        void api.deleteArchive(connection, archive.sessionId).then(refresh);
-                    }}
-                  >
-                    Delete
-                  </button>
-                </div>
-                <div className="archive-tracks">
-                  <span>Playback</span>
-                  {archive.audioTracks.map((track) => (
+            {archives.map((archive) => {
+              const p95Latency = archiveP95Latency(archive);
+              return (
+                <article className="archive-row" key={archive.sessionId}>
+                  <div>
+                    <strong>{new Date(archive.createdAt).toLocaleString()}</strong>
+                    <span>
+                      {archive.audioTracks.length} audio tracks · {archive.transcripts.length}{' '}
+                      transcripts
+                    </span>
+                    <span>
+                      {archive.latencyReport.sampleCount} timing samples
+                      {p95Latency === undefined ? '' : ` · p95 ${formatLatency(p95Latency)}`}
+                    </span>
+                  </div>
+                  <div>
+                    <span>
+                      {archive.retained
+                        ? 'Retained'
+                        : `Expires ${new Date(archive.retentionDeadline).toLocaleDateString()}`}
+                    </span>
+                    <code>{archive.integritySha256?.slice(0, 12) ?? 'recording'}</code>
+                  </div>
+                  <div className="archive-actions">
                     <button
-                      key={track.channelId}
-                      disabled={!track.sha256}
-                      onClick={() => void playArchive(archive.sessionId, track.channelId)}
-                    >
-                      {track.language.toUpperCase()}
-                    </button>
-                  ))}
-                  <span>Transcripts</span>
-                  {archive.transcripts.map((transcript) => (
-                    <button
-                      key={transcript.channelId}
-                      disabled={!transcript.sha256}
                       onClick={() =>
-                        void exportTranscript(
-                          archive.sessionId,
-                          transcript.channelId,
-                          transcript.language,
-                        )
+                        void api
+                          .retain(connection, archive.sessionId, !archive.retained)
+                          .then(refresh)
                       }
                     >
-                      Export {transcript.language.toUpperCase()}
+                      {archive.retained ? 'Resume expiry' : 'Retain'}
                     </button>
-                  ))}
-                </div>
-              </article>
-            ))}
+                    <button
+                      className="danger"
+                      onClick={() => {
+                        if (window.confirm('Permanently delete this local archive?'))
+                          void api.deleteArchive(connection, archive.sessionId).then(refresh);
+                      }}
+                    >
+                      Delete
+                    </button>
+                  </div>
+                  <div className="archive-tracks">
+                    <span>Playback</span>
+                    {archive.audioTracks.map((track) => (
+                      <button
+                        key={track.channelId}
+                        disabled={!track.sha256}
+                        onClick={() => void playArchive(archive.sessionId, track.channelId)}
+                      >
+                        {track.language.toUpperCase()}
+                      </button>
+                    ))}
+                    <span>Transcripts</span>
+                    {archive.transcripts.map((transcript) => (
+                      <button
+                        key={transcript.channelId}
+                        disabled={!transcript.sha256}
+                        onClick={() =>
+                          void exportTranscript(
+                            archive.sessionId,
+                            transcript.channelId,
+                            transcript.language,
+                          )
+                        }
+                      >
+                        Export {transcript.language.toUpperCase()}
+                      </button>
+                    ))}
+                    <span>Diagnostics</span>
+                    <button
+                      disabled={!archive.latencyReport.sha256}
+                      onClick={() => void exportLatency(archive.sessionId)}
+                    >
+                      Export timing
+                    </button>
+                  </div>
+                </article>
+              );
+            })}
             {playbackUrl && (
               <div className="archive-player">
                 <strong>Archive playback</strong>

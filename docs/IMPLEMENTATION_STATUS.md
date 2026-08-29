@@ -16,6 +16,7 @@ This document distinguishes implemented code from claims that require external s
 - Cloudflare Worker dry-run reads the listener bundle.
 - Tauri/Rust shell compile-checks on macOS.
 - The private fixture is 45.000 seconds, 48 kHz mono PCM and matches the committed SHA-256.
+- Per-segment capture, transcription, translation, voice, relay, and end-to-end timings are separated, summarized as latest/p50/p95, shown in the operator, and stored in an integrity-hashed JSONL report.
 
 ## Implemented but not externally verified
 

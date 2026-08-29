@@ -18,6 +18,7 @@
 ## Reliability and latency
 
 - p95 capture-to-listener audio is at most ten seconds.
+- Report p50/p95 chunk, transcription, translation, voice-render, relay-submit, and listener-playout delay separately; do not hide the five-second chunk window inside provider latency.
 - Backlog does not grow during a two-hour service.
 - Fifty listeners remain connected across all channels for two hours.
 - Test late join, phone sleep/wake, Wi-Fi change, Safari/Chrome audio unlock, and browser reconnect.

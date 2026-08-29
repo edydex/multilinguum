@@ -109,6 +109,8 @@ describe('processor vertical slice', () => {
     });
     expect(started.json().configurationLocked).toBe(true);
 
+    const captureCompletedAtUnixMs = Date.now() - 1_000;
+
     const replay = await server.inject({
       method: 'POST',
       url: '/api/sessions/current/replay',
@@ -121,6 +123,15 @@ describe('processor vertical slice', () => {
             sourceEndMs: 2_700,
             final: true,
             sequence: 0,
+            timing: {
+              captureCompletedAtUnixMs,
+              chunkReadyAtUnixMs: captureCompletedAtUnixMs + 25,
+              transcriptionEngine: 'test-transcriber',
+              transcription: {
+                startedAtUnixMs: captureCompletedAtUnixMs + 100,
+                completedAtUnixMs: captureCompletedAtUnixMs + 350,
+              },
+            },
           },
         ],
       },
@@ -130,6 +141,18 @@ describe('processor vertical slice', () => {
     expect(
       replay.json().translated.find((item: { language: string }) => item.language === 'en').text,
     ).toBe('Grace to you and peace from God our Father.');
+
+    const current = await server.inject({
+      method: 'GET',
+      url: '/api/sessions/current',
+      headers: headers(),
+    });
+    const englishHealth = current
+      .json()
+      .health.find((item: { channelId: string }) => item.channelId === 'channel-en');
+    expect(englishHealth.latency.sampleCount).toBe(1);
+    expect(englishHealth.latency.p95.transcriptionMs).toBe(250);
+    expect(englishHealth.latency.p95.translationMs).toBeGreaterThanOrEqual(0);
 
     const muted = await server.inject({
       method: 'POST',
@@ -147,6 +170,11 @@ describe('processor vertical slice', () => {
     });
     expect(stopped.statusCode).toBe(200);
     expect(stopped.json().archive.integritySha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(stopped.json().archive.latencyReport.sampleCount).toBe(4);
+    expect(stopped.json().archive.latencyReport.sha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(stopped.json().archive.latencyReport.channels['channel-en'].p95.transcriptionMs).toBe(
+      250,
+    );
 
     const archives = await server.inject({
       method: 'GET',
@@ -164,6 +192,15 @@ describe('processor vertical slice', () => {
     expect(transcript.statusCode).toBe(200);
     expect(transcript.headers['content-type']).toContain('application/x-ndjson');
     expect(transcript.body).toContain('Grace to you and peace from God our Father.');
+
+    const latency = await server.inject({
+      method: 'GET',
+      url: `/api/archives/${sessionId}/latency`,
+      headers: headers(),
+    });
+    expect(latency.statusCode).toBe(200);
+    expect(latency.headers['content-type']).toContain('application/x-ndjson');
+    expect(latency.body).toContain('sourceEndToTranscriptMs');
 
     const absentAudio = await server.inject({
       method: 'GET',

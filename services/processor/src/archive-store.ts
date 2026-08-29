@@ -8,10 +8,12 @@ import { promisify } from 'node:util';
 import type {
   ArchiveManifest,
   ArchiveStore,
+  PipelineLatencySample,
   RenderedSpeech,
   ServiceSession,
   TranscriptSegment,
 } from '@multilinguum/protocol';
+import { summarizeLatency } from './latency.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -80,6 +82,11 @@ export class FileArchiveStore implements ArchiveStore {
         language: channel.targetLanguage,
         path: `transcripts/${channel.id}.jsonl`,
       })),
+      latencyReport: {
+        path: 'latency.jsonl',
+        sampleCount: 0,
+        channels: {},
+      },
       retentionDeadline,
       retained: session.archivePolicy.retainIndefinitely,
     };
@@ -123,6 +130,16 @@ export class FileArchiveStore implements ArchiveStore {
     await appendFile(
       path.join(this.#sessionRoot(sessionId), 'audio', `${channelId}.pcm`),
       chunk.data,
+      { mode: 0o600 },
+    );
+  }
+
+  async appendLatency(sample: PipelineLatencySample): Promise<void> {
+    assertSafeId(sample.sessionId);
+    assertSafeId(sample.channelId);
+    await appendFile(
+      path.join(this.#sessionRoot(sample.sessionId), 'latency.jsonl'),
+      `${JSON.stringify(sample)}\n`,
       { mode: 0o600 },
     );
   }
@@ -188,12 +205,46 @@ export class FileArchiveStore implements ArchiveStore {
         }
       }),
     );
+    let latencySamples: PipelineLatencySample[] = [];
+    let latencySha256: string | undefined;
+    const latencyPath = path.join(this.#sessionRoot(sessionId), manifest.latencyReport.path);
+    try {
+      const contents = await readFile(latencyPath, 'utf8');
+      latencySamples = contents
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .map((line) => JSON.parse(line) as PipelineLatencySample);
+      latencySha256 = await sha256File(latencyPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    const groupedLatency = new Map<string, PipelineLatencySample[]>();
+    for (const sample of latencySamples) {
+      const channelSamples = groupedLatency.get(sample.channelId) ?? [];
+      channelSamples.push(sample);
+      groupedLatency.set(sample.channelId, channelSamples);
+    }
+    const latencyReport: ArchiveManifest['latencyReport'] = {
+      path: 'latency.jsonl',
+      sampleCount: latencySamples.length,
+      channels: Object.fromEntries(
+        [...groupedLatency].map(([channelId, samples]) => [channelId, summarizeLatency(samples)]),
+      ),
+      ...(latencySha256 ? { sha256: latencySha256 } : {}),
+    };
     const completedAt = new Date().toISOString();
-    const integrityPayload = JSON.stringify({ ...manifest, audioTracks, transcripts, completedAt });
+    const integrityPayload = JSON.stringify({
+      ...manifest,
+      audioTracks,
+      transcripts,
+      latencyReport,
+      completedAt,
+    });
     const finalized: ArchiveManifest = {
       ...manifest,
       audioTracks,
       transcripts,
+      latencyReport,
       completedAt,
       integritySha256: createHash('sha256').update(integrityPayload).digest('hex'),
     };
@@ -280,6 +331,22 @@ export class FileArchiveStore implements ArchiveStore {
     }
   }
 
+  async readLatency(sessionId: string): Promise<{ data: Buffer; filename: string }> {
+    assertSafeId(sessionId);
+    const manifest = await this.#readManifest(sessionId);
+    try {
+      return {
+        data: await readFile(path.join(this.#sessionRoot(sessionId), manifest.latencyReport.path)),
+        filename: `${sessionId}-latency.jsonl`,
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        throw new Error('Archive latency report not found.');
+      }
+      throw error;
+    }
+  }
+
   #sessionForActiveChannel(channelId: string): string | undefined {
     const rows = this.#database
       .prepare('SELECT session_id, manifest_path FROM archives WHERE completed_at IS NULL')
@@ -308,7 +375,17 @@ export class FileArchiveStore implements ArchiveStore {
 
   async #readManifest(sessionId: string): Promise<ArchiveManifest> {
     assertSafeId(sessionId);
-    return JSON.parse(await readFile(this.#manifestPath(sessionId), 'utf8')) as ArchiveManifest;
+    const manifest = JSON.parse(
+      await readFile(this.#manifestPath(sessionId), 'utf8'),
+    ) as ArchiveManifest;
+    return {
+      ...manifest,
+      latencyReport: manifest.latencyReport ?? {
+        path: 'latency.jsonl',
+        sampleCount: 0,
+        channels: {},
+      },
+    };
   }
 
   async #writeManifest(manifest: ArchiveManifest): Promise<void> {

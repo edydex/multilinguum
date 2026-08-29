@@ -13,6 +13,7 @@ The current repository is a production-shaped vertical slice, not a service-read
 - Mobile listener PWA with language selection, Listen/Pause, volume, captions, reconnect state, and AI-voice disclosure.
 - Consent-gated Chatterbox Multilingual V3 worker with encrypted samples and immediate revocation.
 - SQLite archive index, JSONL transcripts, 48 kHz PCM working tracks, finalized Opus files, SHA-256 integrity metadata, manual retain/delete, and 30-day purge.
+- Per-stage latest/p50/p95 latency telemetry with an exportable, integrity-hashed archive report.
 - Linux/NVIDIA Docker Compose deployment and a Cloudflare Worker for the stable public page.
 - Credential-free RU to EN/RU/ES/UK replay and an ignored authorized 45-second sermon fixture.
 
@@ -96,6 +97,8 @@ OpenAI, LiveKit, Cloudflare, and archive/voice keys belong only on the processor
 Codex and ChatGPT subscriptions are development tools, not production API credit. Production calls require a separately billed OpenAI API project and API key.
 
 Use the [OpenAI API setup runbook](docs/OPENAI_SETUP.md) to create a dedicated project and install its key on the GPU processor without exposing it in chat or shell history.
+
+See [Latency measurement](docs/LATENCY_MEASUREMENT.md) for the exact realtime metrics and paid-call strategy.
 
 ## License
 

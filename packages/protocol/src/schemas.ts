@@ -56,6 +56,20 @@ export const transcriptInputSchema = z.object({
   sourceEndMs: z.number().int().positive(),
   final: z.boolean().default(true),
   sequence: z.number().int().nonnegative(),
+  timing: z
+    .object({
+      captureCompletedAtUnixMs: z.number().int().nonnegative().optional(),
+      chunkReadyAtUnixMs: z.number().int().nonnegative().optional(),
+      transcriptionEngine: z.string().min(1).optional(),
+      transcription: z
+        .object({
+          startedAtUnixMs: z.number().int().nonnegative(),
+          firstDeltaAtUnixMs: z.number().int().nonnegative().optional(),
+          completedAtUnixMs: z.number().int().nonnegative(),
+        })
+        .optional(),
+    })
+    .optional(),
 });
 
 export const pairingRequestSchema = z.object({

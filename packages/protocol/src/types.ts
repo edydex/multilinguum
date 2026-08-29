@@ -81,7 +81,72 @@ export interface ChannelHealth {
   backlogMs: number;
   engine: string;
   state: 'idle' | 'starting' | 'healthy' | 'degraded' | 'failed' | 'muted';
+  latency?: ChannelLatencySummary;
   error?: string;
+}
+
+export interface LatencySpan {
+  startedAtUnixMs: number;
+  firstDeltaAtUnixMs?: number | undefined;
+  completedAtUnixMs: number;
+}
+
+export interface SourceProcessingTiming {
+  captureCompletedAtUnixMs?: number | undefined;
+  chunkReadyAtUnixMs?: number | undefined;
+  transcriptionEngine?: string | undefined;
+  transcription?: LatencySpan | undefined;
+}
+
+export interface PipelineLatencyBreakdown {
+  chunkWindowMs: number;
+  chunkReadyDelayMs?: number;
+  captureToTranscriptionStartMs?: number;
+  transcriptionFirstDeltaMs?: number;
+  transcriptionMs?: number;
+  translationFirstDeltaMs?: number;
+  translationMs?: number;
+  speechRenderMs?: number;
+  captionPublishMs?: number;
+  audioPublishMs?: number;
+  sourceEndToTranscriptMs?: number;
+  sourceEndToCaptionMs?: number;
+  sourceEndToAudioMs?: number;
+  sourceStartToAudioMs?: number;
+}
+
+export interface PipelineLatencySample {
+  id: string;
+  sessionId: string;
+  channelId: string;
+  language: Language;
+  sequence: number;
+  sourceStartMs: number;
+  sourceEndMs: number;
+  recordedAt: string;
+  captureCompletedAtUnixMs?: number;
+  chunkReadyAtUnixMs?: number;
+  transcription?: LatencySpan;
+  translation?: LatencySpan;
+  speechRender?: LatencySpan;
+  captionPublish?: LatencySpan;
+  audioPublish?: LatencySpan;
+  metrics: PipelineLatencyBreakdown;
+  engines: {
+    transcription?: string;
+    translation?: string;
+    speechRenderer?: string;
+    relay: string;
+  };
+  outcome: 'complete' | 'failed';
+  error?: string;
+}
+
+export interface ChannelLatencySummary {
+  sampleCount: number;
+  latest: PipelineLatencyBreakdown;
+  p50: PipelineLatencyBreakdown;
+  p95: PipelineLatencyBreakdown;
 }
 
 export interface TranscriptSegment {
@@ -122,6 +187,12 @@ export interface ArchiveManifest {
   engineVersions: Record<string, string>;
   audioTracks: AudioTrackManifest[];
   transcripts: TranscriptManifest[];
+  latencyReport: {
+    path: 'latency.jsonl';
+    sampleCount: number;
+    channels: Record<string, ChannelLatencySummary>;
+    sha256?: string;
+  };
   retentionDeadline: string;
   retained: boolean;
   integritySha256?: string;
@@ -141,6 +212,7 @@ export type ProcessorEvent =
   | { type: 'session'; session: ServiceSession }
   | { type: 'health'; health: ChannelHealth }
   | { type: 'transcript'; segment: TranscriptSegment }
+  | { type: 'latency'; sample: PipelineLatencySample }
   | { type: 'cost'; estimatedCostUsd: number; budgetWarning: boolean }
   | { type: 'error'; scope: string; message: string };
 

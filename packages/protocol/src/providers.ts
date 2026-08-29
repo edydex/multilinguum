@@ -2,6 +2,7 @@ import type {
   ArchiveManifest,
   ChannelConfig,
   Language,
+  PipelineLatencySample,
   ServiceSession,
   TranscriptSegment,
   VoiceProfile,
@@ -66,6 +67,7 @@ export interface ArchiveStore {
   create(session: ServiceSession, engineVersions: Record<string, string>): Promise<ArchiveManifest>;
   appendTranscript(segment: TranscriptSegment): Promise<void>;
   appendAudio(channelId: string, chunk: RenderedSpeech): Promise<void>;
+  appendLatency(sample: PipelineLatencySample): Promise<void>;
   finalize(sessionId: string): Promise<ArchiveManifest>;
   list(): Promise<ArchiveManifest[]>;
   retain(sessionId: string, retained: boolean): Promise<ArchiveManifest>;
