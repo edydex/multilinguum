@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { rmsToDb, smoothDb } from './audioLevel';
 
 export interface AudioDevice {
@@ -19,9 +21,33 @@ interface WorkletFrame {
   channelCount: number;
 }
 
+interface NativeAudioInput {
+  name: string;
+  isDefault: boolean;
+}
+
+interface NativeAudioFrame {
+  pcm: number[];
+  rms: number;
+  peak: number;
+  channel: number;
+  channelCount: number;
+  capturedAtUnixMs: number;
+}
+
+interface NativeAudioConfig {
+  deviceName: string;
+  sampleRate: number;
+  channelCount: number;
+}
+
 type PcmListener = (frame: CapturedPcmFrame) => void;
 
-export function useAudioMeter(selectedDeviceId?: string) {
+function isTauriRuntime(): boolean {
+  return '__TAURI_INTERNALS__' in window;
+}
+
+export function useAudioMeter(selectedDeviceId: string | undefined, active = true) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [levelDb, setLevelDb] = useState(-60);
   const [activeChannel, setActiveChannel] = useState(0);
@@ -32,6 +58,19 @@ export function useAudioMeter(selectedDeviceId?: string) {
 
   useEffect(() => {
     let cancelled = false;
+    if (isTauriRuntime()) {
+      void invoke<NativeAudioInput[]>('list_audio_inputs')
+        .then((available) => {
+          if (cancelled) return;
+          setDevices(available.map((device) => ({ id: device.name, label: device.name })));
+        })
+        .catch((cause) => {
+          if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+        });
+      return () => {
+        cancelled = true;
+      };
+    }
     const refreshDevices = async () => {
       const available = await navigator.mediaDevices.enumerateDevices();
       if (cancelled) return;
@@ -59,6 +98,60 @@ export function useAudioMeter(selectedDeviceId?: string) {
   }, []);
 
   useEffect(() => {
+    if (!active) {
+      setLevelDb(-60);
+      setActiveChannel(0);
+      setChannelCount(0);
+      return;
+    }
+    if (isTauriRuntime()) {
+      let cancelled = false;
+      let unlistenFrame: UnlistenFn | undefined;
+      let unlistenError: UnlistenFn | undefined;
+      let lastMeterUpdate = 0;
+      let smoothedDb = -60;
+      const startNative = async () => {
+        try {
+          unlistenFrame = await listen<NativeAudioFrame>('audio-input-frame', (event) => {
+            if (cancelled) return;
+            const nextDb = rmsToDb(event.payload.rms);
+            smoothedDb = smoothDb(smoothedDb, nextDb);
+            if (event.payload.capturedAtUnixMs - lastMeterUpdate >= 50) {
+              lastMeterUpdate = event.payload.capturedAtUnixMs;
+              setLevelDb(smoothedDb);
+              setActiveChannel(event.payload.channel);
+              setChannelCount(event.payload.channelCount);
+            }
+            const samples = Int16Array.from(event.payload.pcm);
+            const frame = {
+              pcm: samples.buffer,
+              capturedAtUnixMs: event.payload.capturedAtUnixMs,
+            };
+            for (const listener of listeners.current) listener(frame);
+          });
+          unlistenError = await listen<string>('audio-input-error', (event) => {
+            if (!cancelled) setError(event.payload);
+          });
+          const config = await invoke<NativeAudioConfig>('start_audio_input', {
+            deviceName: selectedDeviceId,
+          });
+          if (!cancelled) {
+            setSampleRate(config.sampleRate);
+            setChannelCount(config.channelCount);
+            setError(undefined);
+          }
+        } catch (cause) {
+          if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+        }
+      };
+      void startNative();
+      return () => {
+        cancelled = true;
+        unlistenFrame?.();
+        unlistenError?.();
+        void invoke('stop_audio_input');
+      };
+    }
     let cancelled = false;
     let stream: MediaStream | undefined;
     let context: AudioContext | undefined;
@@ -128,7 +221,7 @@ export function useAudioMeter(selectedDeviceId?: string) {
       stream?.getTracks().forEach((track) => track.stop());
       void context?.close();
     };
-  }, [selectedDeviceId]);
+  }, [active, selectedDeviceId]);
 
   return {
     devices,

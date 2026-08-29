@@ -99,11 +99,12 @@ export function App() {
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | undefined>(
     () => localStorage.getItem('audioDeviceId') || undefined,
   );
+  const [audioReady, setAudioReady] = useState(false);
   const [boothDeviceLabel, setBoothDeviceLabel] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [playbackUrl, setPlaybackUrl] = useState<string>();
-  const audio = useAudioMeter(selectedDeviceId);
+  const audio = useAudioMeter(selectedDeviceId, audioReady);
   const {
     devices,
     levelDb,
@@ -133,9 +134,11 @@ export function App() {
         if (bootstrap.processorUrl) setBaseUrl(bootstrap.processorUrl);
         if (bootstrap.processorToken) setToken(bootstrap.processorToken);
         if (bootstrap.audioDeviceLabel) setBoothDeviceLabel(bootstrap.audioDeviceLabel);
+        else setAudioReady(true);
       })
       .catch(() => {
         // The same React UI can run in a browser during development, where Tauri IPC is absent.
+        setAudioReady(true);
       });
   }, []);
 
@@ -144,6 +147,7 @@ export function App() {
     const configured = devices.find((device) => device.label === boothDeviceLabel);
     if (!configured) return;
     if (configured.id !== selectedDeviceId) setSelectedDeviceId(configured.id);
+    setAudioReady(true);
     setBoothDeviceLabel(undefined);
   }, [boothDeviceLabel, devices, selectedDeviceId]);
 
