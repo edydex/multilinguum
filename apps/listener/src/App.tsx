@@ -97,6 +97,9 @@ export function App() {
 
   useEffect(() => {
     if (!language || !connected) return;
+    void roomRef.current?.localParticipant
+      .setMetadata(JSON.stringify({ role: 'anonymous-listener', language }))
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
     const track = tracksRef.current.get(language);
     if (!track) return;
     audioRef.current?.remove();
@@ -113,6 +116,7 @@ export function App() {
   }, [connected, language, volume]);
 
   const beginListening = async () => {
+    if (!language) return;
     if (playing && audioRef.current) {
       audioRef.current.pause();
       setPlaying(false);
@@ -126,7 +130,9 @@ export function App() {
     setError(undefined);
     try {
       const { Room: LiveKitRoom, RoomEvent } = await import('livekit-client');
-      const response = await fetch(new URL('/api/public/token', apiBase));
+      const tokenUrl = new URL('/api/public/token', apiBase);
+      tokenUrl.searchParams.set('language', language);
+      const response = await fetch(tokenUrl);
       if (!response.ok) throw new Error('The audio stream is not ready yet.');
       const credentials = (await response.json()) as TokenResponse;
       const room = new LiveKitRoom({ adaptiveStream: true, dynacast: false });

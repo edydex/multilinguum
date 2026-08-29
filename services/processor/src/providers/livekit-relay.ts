@@ -2,13 +2,16 @@ import {
   AudioFrame,
   AudioSource,
   LocalAudioTrack,
+  type Participant,
   Room,
+  RoomEvent,
   TrackPublishOptions,
   TrackSource,
 } from '@livekit/rtc-node';
 import { AccessToken } from 'livekit-server-sdk';
 import type {
   ChannelConfig,
+  Language,
   MediaRelay,
   ProcessorEvent,
   PublishedChannel,
@@ -30,6 +33,8 @@ export class LiveKitMediaRelay implements MediaRelay {
   readonly #apiSecret: string;
   readonly #broadcast: (event: ProcessorEvent) => void;
   readonly #channels = new Map<string, PublishedAudio>();
+  readonly #listenerLanguages = new Map<string, Language>();
+  readonly #listenerCountListeners = new Set<(language: Language, count: number) => void>();
   #room: Room | undefined;
   #session: ServiceSession | undefined;
 
@@ -43,6 +48,11 @@ export class LiveKitMediaRelay implements MediaRelay {
     this.#apiKey = apiKey;
     this.#apiSecret = apiSecret;
     this.#broadcast = broadcast;
+  }
+
+  onListenerCount(listener: (language: Language, count: number) => void): () => void {
+    this.#listenerCountListeners.add(listener);
+    return () => this.#listenerCountListeners.delete(listener);
   }
 
   async createSession(session: ServiceSession): Promise<void> {
@@ -62,10 +72,25 @@ export class LiveKitMediaRelay implements MediaRelay {
       canSubscribe: false,
     });
     const room = new Room();
+    const trackListener = (participant: Participant) => {
+      const language = this.#listenerLanguage(participant.metadata);
+      if (language) this.#listenerLanguages.set(participant.identity, language);
+      else this.#listenerLanguages.delete(participant.identity);
+      this.#notifyListenerCounts();
+    };
+    room.on(RoomEvent.ParticipantConnected, trackListener);
+    room.on(RoomEvent.ParticipantMetadataChanged, (_metadata, participant) =>
+      trackListener(participant),
+    );
+    room.on(RoomEvent.ParticipantDisconnected, (participant) => {
+      this.#listenerLanguages.delete(participant.identity);
+      this.#notifyListenerCounts();
+    });
     await room.connect(this.#url, await token.toJwt(), {
       autoSubscribe: false,
       dynacast: false,
     });
+    for (const participant of room.remoteParticipants.values()) trackListener(participant);
     this.#room = room;
   }
 
@@ -128,6 +153,37 @@ export class LiveKitMediaRelay implements MediaRelay {
     this.#channels.clear();
     await this.#room?.disconnect();
     this.#room = undefined;
+    this.#listenerLanguages.clear();
+    this.#notifyListenerCounts();
     this.#session = undefined;
+  }
+
+  #listenerLanguage(metadata: string): Language | undefined {
+    try {
+      const parsed = JSON.parse(metadata) as { role?: unknown; language?: unknown };
+      if (
+        parsed.role === 'anonymous-listener' &&
+        (parsed.language === 'en' ||
+          parsed.language === 'ru' ||
+          parsed.language === 'es' ||
+          parsed.language === 'uk')
+      ) {
+        return parsed.language;
+      }
+    } catch {
+      // Ignore participants without Multilinguum listener metadata.
+    }
+    return undefined;
+  }
+
+  #notifyListenerCounts(): void {
+    const languages = this.#session?.targets.map((channel) => channel.targetLanguage) ?? [];
+    for (const language of languages) {
+      let count = 0;
+      for (const selected of this.#listenerLanguages.values()) {
+        if (selected === language) count += 1;
+      }
+      for (const listener of this.#listenerCountListeners) listener(language, count);
+    }
   }
 }

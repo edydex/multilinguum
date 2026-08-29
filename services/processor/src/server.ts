@@ -6,7 +6,7 @@ import websocket from '@fastify/websocket';
 import { AccessToken } from 'livekit-server-sdk';
 import { z, ZodError } from 'zod';
 import type { ProcessorEvent, PublicServiceState } from '@multilinguum/protocol';
-import { transcriptInputSchema } from '@multilinguum/protocol';
+import { languageSchema, transcriptInputSchema } from '@multilinguum/protocol';
 import type { WebSocket } from 'ws';
 import { FileArchiveStore } from './archive-store.js';
 import type { ProcessorConfig } from './config.js';
@@ -36,6 +36,8 @@ const channelActionSchema = z.object({
   forceNatural: z.boolean().optional(),
   restart: z.boolean().optional(),
 });
+
+const listenerTokenQuerySchema = z.object({ language: languageSchema });
 
 function hasControlToken(request: FastifyRequest, expected: string): boolean {
   const authorization = request.headers.authorization;
@@ -159,6 +161,7 @@ export async function buildServer(config: ProcessorConfig) {
         }
       : {}),
   });
+  relay.onListenerCount((language, count) => engine.updateListenerCount(language, count));
 
   const requireControl = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!hasControlToken(request, config.PROCESSOR_CONTROL_TOKEN)) {
@@ -207,7 +210,7 @@ export async function buildServer(config: ProcessorConfig) {
 
   app.get('/api/public/service', async () => publicState(config, engine));
 
-  app.get('/api/public/token', async (_request, reply) => {
+  app.get('/api/public/token', async (request, reply) => {
     const session = engine.current();
     if (session?.state !== 'live' || !session.relayRoom) {
       return reply.code(404).send({ error: 'No live service.' });
@@ -215,10 +218,15 @@ export async function buildServer(config: ProcessorConfig) {
     if (!config.LIVEKIT_URL || !config.LIVEKIT_API_KEY || !config.LIVEKIT_API_SECRET) {
       return reply.code(503).send({ error: 'Media relay is not configured.' });
     }
+    const { language } = listenerTokenQuerySchema.parse(request.query);
+    const requestedChannel = session.targets.find(
+      (channel) => channel.targetLanguage === language && !channel.muted,
+    );
+    if (!requestedChannel) return reply.code(404).send({ error: 'Language is not available.' });
     const token = new AccessToken(config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET, {
       identity: `listener-${randomUUID()}`,
       ttl: '5m',
-      metadata: JSON.stringify({ role: 'anonymous-listener' }),
+      metadata: JSON.stringify({ role: 'anonymous-listener', language }),
     });
     token.addGrant({
       room: session.relayRoom,
@@ -226,6 +234,7 @@ export async function buildServer(config: ProcessorConfig) {
       canPublish: false,
       canPublishData: false,
       canSubscribe: true,
+      canUpdateOwnMetadata: true,
     });
     return {
       url: config.LIVEKIT_URL.toString(),

@@ -100,7 +100,7 @@ export class OpenAILiveTranscriber implements Transcriber {
     this.#secretProvider = options.secretProvider ?? new OpenAITranscriptionSecretProvider(apiKey);
     this.#connectionFactory = options.connectionFactory ?? createWebSocketRealtimeConnection;
     this.#stopDrainMs = options.stopDrainMs ?? 15_000;
-    this.#commitIntervalMs = options.commitIntervalMs ?? 4_000;
+    this.#commitIntervalMs = options.commitIntervalMs ?? 2_000;
   }
 
   async start(session: ServiceSession): Promise<void> {

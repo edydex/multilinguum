@@ -1,5 +1,6 @@
 import type {
   ChannelConfig,
+  Language,
   MediaRelay,
   ProcessorEvent,
   PublishedChannel,
@@ -17,6 +18,10 @@ export class BroadcastMediaRelay implements MediaRelay {
 
   constructor(broadcast: EventBroadcaster) {
     this.#broadcast = broadcast;
+  }
+
+  onListenerCount(_listener: (language: Language, count: number) => void): () => void {
+    return () => undefined;
   }
 
   async createSession(session: ServiceSession): Promise<void> {

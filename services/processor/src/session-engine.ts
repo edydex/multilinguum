@@ -61,6 +61,16 @@ export class SessionEngine {
     return [...this.#channels.values()].map((channel) => channel.health);
   }
 
+  updateListenerCount(language: ChannelConfig['targetLanguage'], count: number): void {
+    for (const runtime of this.#channels.values()) {
+      if (runtime.config.targetLanguage !== language || runtime.health.listenerCount === count) {
+        continue;
+      }
+      runtime.health = { ...runtime.health, listenerCount: Math.max(0, count) };
+      this.#emitHealth(runtime);
+    }
+  }
+
   async create(input: unknown): Promise<ServiceSession> {
     if (this.#session && !['completed', 'failed'].includes(this.#session.state)) {
       throw new Error('Only one church service can be active at a time.');

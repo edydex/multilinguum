@@ -117,6 +117,9 @@ export function App() {
 
   const connection = useMemo<OperatorConnection>(() => ({ baseUrl, token }), [baseUrl, token]);
   const live = session?.state === 'live' || session?.state === 'starting';
+  const configuredSource = live && session ? session.sourceLanguage : source;
+  const displayedLanguages: Language[] =
+    live && session ? session.targets.map((channel) => channel.targetLanguage) : allLanguages;
   const capture = useAudioStreamer(
     session?.state === 'live',
     session?.id,
@@ -510,14 +513,14 @@ export function App() {
                 <div className="segmented">
                   <button
                     disabled={live}
-                    className={source === 'ru' ? 'selected' : ''}
+                    className={configuredSource === 'ru' ? 'selected' : ''}
                     onClick={() => changeSource('ru')}
                   >
                     Russian
                   </button>
                   <button
                     disabled={live}
-                    className={source === 'en' ? 'selected' : ''}
+                    className={configuredSource === 'en' ? 'selected' : ''}
                     onClick={() => changeSource('en')}
                   >
                     English
@@ -536,15 +539,35 @@ export function App() {
                   <h2>Listener languages</h2>
                 </div>
                 <span>
-                  {Object.values(targets).filter((target) => target.enabled).length} active
+                  {live && session
+                    ? session.targets.length
+                    : Object.values(targets).filter((target) => target.enabled).length}{' '}
+                  active
                 </span>
               </div>
               <div className="channel-grid">
-                {allLanguages.map((language) => {
-                  const draft = targets[language]!;
-                  const itemHealth = health[`channel-${language}`];
-                  const caption = captions[`channel-${language}`];
-                  const isSource = language === source;
+                {displayedLanguages.map((language) => {
+                  const liveConfig = live
+                    ? session?.targets.find((channel) => channel.targetLanguage === language)
+                    : undefined;
+                  const draft = liveConfig
+                    ? {
+                        enabled: true,
+                        outputMode: (liveConfig.voiceMode === 'source'
+                          ? 'source'
+                          : liveConfig.voiceMode === 'cloned'
+                            ? 'cloned'
+                            : liveConfig.translationProvider === 'openai-realtime'
+                              ? 'generic-fast'
+                              : 'generic-expressive') as OutputMode,
+                        profileId: liveConfig.voiceProfileId,
+                      }
+                    : targets[language]!;
+                  const channelId = liveConfig?.id ?? `channel-${language}`;
+                  const itemHealth = health[channelId];
+                  const caption = captions[channelId];
+                  const isSource =
+                    liveConfig?.voiceMode === 'source' || language === configuredSource;
                   const availableProfiles = voiceProfiles.filter(
                     (profile) =>
                       profile.status === 'ready' &&
@@ -616,7 +639,7 @@ export function App() {
                           {!isSource && (
                             <option value="generic-expressive">Generic · Expressive</option>
                           )}
-                          {!isSource && source === 'ru' && language === 'en' && (
+                          {!isSource && configuredSource === 'ru' && language === 'en' && (
                             <>
                               {availableProfiles.map((profile) => (
                                 <option key={profile.id} value={`cloned:${profile.id}`}>

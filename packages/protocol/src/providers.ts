@@ -76,6 +76,7 @@ export interface PublishedChannel {
 
 export interface MediaRelay {
   readonly name: string;
+  onListenerCount(listener: (language: Language, count: number) => void): () => void;
   createSession(session: ServiceSession): Promise<void>;
   publishChannel(config: ChannelConfig): Promise<PublishedChannel>;
   publishAudio(channelId: string, chunk: RenderedSpeech): Promise<void>;
