@@ -21,10 +21,10 @@ This document distinguishes implemented code from claims that require external s
 - A glossary-aware `gpt-5.6-terra` benchmark corrected both meaning-sensitive errors observed in direct realtime output; its 117 input and 42 output tokens were verified in the dashboard as complimentary data-sharing incentive traffic with $0 model cost.
 - The live capture route now owns one shared GPT-Live-Transcribe session plus one GPT-Realtime-Translate session per active natural-voice target. Provider events are normalized behind shared contracts, 48 kHz capture is converted to 24 kHz API audio, returned PCM is converted back to the 48 kHz relay/archive format, and replay tests cover source VAD timing, transcript clauses, audio, and per-channel fallback isolation.
 - The operator defaults translated channels to the glossary-aware accuracy path and labels the direct path as fast/experimental. Cloned voice is locked to finalized glossary-aware clauses. Both paths retain the conservative two-hour cloud estimate until measured cascade cost replaces the planning baseline.
+- An authorized 45-second actual-sermon rehearsal exercised the integrated private-production capture, transcription, Terra, cloned/natural fallback, timing, and archive path. It proved the pipeline and fallback behavior, but fixed four-second transcription commits split words and clauses and therefore failed the sermon-accuracy gate. A separate coherent quality reference completed transcription, translation, and five sentence-sized Chatterbox renders with independently verified complete speech. See [the authorized sermon benchmark](benchmarks/2026-08-29-authorized-sermon-ru-en.md).
 
 ## Implemented but not externally verified
 
-- OpenAI file transcription, Responses translation, and natural speech requests.
 - LiveKit server-side track connection, publication, and listener subscription.
 - Cloudflare deployment and stable public hostname.
 - Remote capture through a TLS reverse proxy.
