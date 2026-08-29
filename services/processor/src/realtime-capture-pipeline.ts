@@ -30,7 +30,16 @@ interface CascadeBuffer {
   timing: Parameters<SessionEngine['ingestLiveTranscript']>[1];
 }
 
-const expressiveMaximumWindowMs = 4_500;
+const expressiveMaximumWindowMs = 8_000;
+
+function lastSentenceBoundary(text: string): number {
+  const pattern = /[.!?…]["'»”)]*(?=\s|$)/gu;
+  let boundary = 0;
+  for (const match of text.matchAll(pattern)) {
+    boundary = (match.index ?? 0) + match[0].length;
+  }
+  return boundary;
+}
 
 export type RealtimeTranslationChannelFactory = () => RealtimeTranslationChannel;
 
@@ -273,12 +282,56 @@ export class RealtimeCapturePipeline {
       timing,
     };
     const buffered = this.#cascadeBuffer.segment;
-    const sentenceEnded = /[.!?…]["'»”)]*\s*$/u.test(buffered.text);
-    if (
-      sentenceEnded ||
-      buffered.sourceEndMs - buffered.sourceStartMs >= expressiveMaximumWindowMs
-    ) {
+    const boundary = lastSentenceBoundary(buffered.text);
+    if (boundary > 0) {
+      this.#flushCascadeSentence(boundary);
+    } else if (buffered.sourceEndMs - buffered.sourceStartMs >= expressiveMaximumWindowMs) {
       this.#flushCascadeTranscript();
+    }
+  }
+
+  #flushCascadeSentence(boundary: number): void {
+    const buffered = this.#cascadeBuffer;
+    if (!buffered) return;
+    const completeText = buffered.segment.text.slice(0, boundary).trim();
+    const remainingText = buffered.segment.text.slice(boundary).trim();
+    if (!completeText) return;
+    const durationMs = buffered.segment.sourceEndMs - buffered.segment.sourceStartMs;
+    const completeRatio = Math.min(1, boundary / Math.max(1, buffered.segment.text.length));
+    const completeEndMs = Math.max(
+      buffered.segment.sourceStartMs + 1,
+      Math.round(buffered.segment.sourceStartMs + durationMs * completeRatio),
+    );
+    const trailingMs = Math.max(0, buffered.segment.sourceEndMs - completeEndMs);
+    const captureCompletedAtUnixMs = buffered.timing?.captureCompletedAtUnixMs;
+    const completeTiming = buffered.timing
+      ? {
+          ...buffered.timing,
+          ...(captureCompletedAtUnixMs !== undefined
+            ? { captureCompletedAtUnixMs: captureCompletedAtUnixMs - trailingMs }
+            : {}),
+        }
+      : undefined;
+    this.#cascadeBuffer = {
+      segment: {
+        ...buffered.segment,
+        text: completeText,
+        sourceEndMs: completeEndMs,
+      },
+      timing: completeTiming,
+    };
+    this.#flushCascadeTranscript();
+    if (remainingText) {
+      this.#cascadeBuffer = {
+        segment: {
+          ...buffered.segment,
+          id: `${buffered.segment.id}-continuation`,
+          text: remainingText,
+          sourceStartMs: completeEndMs,
+          sequence: this.#cascadeSequence,
+        },
+        timing: buffered.timing,
+      };
     }
   }
 

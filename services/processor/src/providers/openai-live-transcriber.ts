@@ -26,7 +26,11 @@ interface CommittedWindow {
 }
 
 export interface TranscriptionSecretProvider {
-  create(input: { model: string; sourceLanguage: 'en' | 'ru' }): Promise<string>;
+  create(input: {
+    model: string;
+    sourceLanguage: 'en' | 'ru';
+    serverVad: boolean;
+  }): Promise<string>;
 }
 
 class OpenAITranscriptionSecretProvider implements TranscriptionSecretProvider {
@@ -36,7 +40,7 @@ class OpenAITranscriptionSecretProvider implements TranscriptionSecretProvider {
     this.#client = new OpenAI({ apiKey });
   }
 
-  async create(input: { model: string; sourceLanguage: 'en' | 'ru' }): Promise<string> {
+  async create(input: Parameters<TranscriptionSecretProvider['create']>[0]): Promise<string> {
     const prompt =
       input.sourceLanguage === 'ru'
         ? 'Русская церковная проповедь. Библия, Евангелие, Господь, благодать, оправдание.'
@@ -55,7 +59,14 @@ class OpenAITranscriptionSecretProvider implements TranscriptionSecretProvider {
               languages: [input.sourceLanguage],
               delay: 'low',
             },
-            turn_detection: null,
+            turn_detection: input.serverVad
+              ? {
+                  type: 'server_vad',
+                  threshold: 0.45,
+                  prefix_padding_ms: 300,
+                  silence_duration_ms: 550,
+                }
+              : null,
           },
         },
       },
@@ -81,9 +92,11 @@ export class OpenAILiveTranscriber implements Transcriber {
   #lastAudioEndMs = 0;
   readonly #stopDrainMs: number;
   readonly #commitIntervalMs: number;
+  readonly #serverVad: boolean;
   #commitWindowStartMs = 0;
   #pendingCommits = 0;
   #stopping = false;
+  #speechActive = false;
 
   constructor(
     apiKey: string,
@@ -93,6 +106,7 @@ export class OpenAILiveTranscriber implements Transcriber {
       connectionFactory?: RealtimeConnectionFactory;
       stopDrainMs?: number;
       commitIntervalMs?: number;
+      serverVad?: boolean;
     } = {},
   ) {
     this.#model = model;
@@ -100,7 +114,8 @@ export class OpenAILiveTranscriber implements Transcriber {
     this.#secretProvider = options.secretProvider ?? new OpenAITranscriptionSecretProvider(apiKey);
     this.#connectionFactory = options.connectionFactory ?? createWebSocketRealtimeConnection;
     this.#stopDrainMs = options.stopDrainMs ?? 15_000;
-    this.#commitIntervalMs = options.commitIntervalMs ?? 2_250;
+    this.#serverVad = options.serverVad ?? true;
+    this.#commitIntervalMs = options.commitIntervalMs ?? (this.#serverVad ? 8_000 : 3_000);
   }
 
   async start(session: ServiceSession): Promise<void> {
@@ -111,6 +126,7 @@ export class OpenAILiveTranscriber implements Transcriber {
     this.#lastAudioEndMs = 0;
     this.#commitWindowStartMs = 0;
     this.#pendingCommits = 0;
+    this.#speechActive = false;
     this.#itemTiming.clear();
     this.#committedWindows.splice(0);
     this.#unassignedItemIds.splice(0);
@@ -118,6 +134,7 @@ export class OpenAILiveTranscriber implements Transcriber {
     const secret = await this.#secretProvider.create({
       model: this.#model,
       sourceLanguage: session.sourceLanguage,
+      serverVad: this.#serverVad,
     });
     const connection = this.#connectionFactory({
       url: 'wss://api.openai.com/v1/realtime',
@@ -144,8 +161,12 @@ export class OpenAILiveTranscriber implements Transcriber {
       type: 'input_audio_buffer.append',
       audio: Buffer.from(data).toString('base64'),
     });
-    if (this.#lastAudioEndMs - this.#commitWindowStartMs >= this.#commitIntervalMs) {
+    if (
+      (!this.#serverVad || this.#speechActive) &&
+      this.#lastAudioEndMs - this.#commitWindowStartMs >= this.#commitIntervalMs
+    ) {
       this.#commit(this.#lastAudioEndMs);
+      this.#speechActive = false;
     }
   }
 
@@ -154,7 +175,10 @@ export class OpenAILiveTranscriber implements Transcriber {
     this.#connection = undefined;
     if (!connection) return;
     this.#stopping = true;
-    if (this.#lastAudioEndMs > this.#commitWindowStartMs) {
+    if (
+      (!this.#serverVad || this.#speechActive) &&
+      this.#lastAudioEndMs > this.#commitWindowStartMs
+    ) {
       this.#commit(this.#lastAudioEndMs, connection);
     }
     if (this.#stopDrainMs > 0 && this.#pendingCommits > 0) {
@@ -185,6 +209,7 @@ export class OpenAILiveTranscriber implements Transcriber {
     }
     const itemId = typeof event.item_id === 'string' ? event.item_id : undefined;
     if (event.type === 'input_audio_buffer.speech_started' && itemId) {
+      this.#speechActive = true;
       this.#itemTiming.set(
         itemId,
         typeof event.audio_start_ms === 'number' ? { startMs: event.audio_start_ms } : {},
@@ -195,6 +220,10 @@ export class OpenAILiveTranscriber implements Transcriber {
       const timing = this.#itemTiming.get(itemId) ?? {};
       if (typeof event.audio_end_ms === 'number') timing.endMs = event.audio_end_ms;
       this.#itemTiming.set(itemId, timing);
+      this.#speechActive = false;
+      if (typeof event.audio_end_ms === 'number') {
+        this.#commitWindowStartMs = Math.max(this.#commitWindowStartMs, event.audio_end_ms);
+      }
       return;
     }
     if (event.type === 'conversation.item.input_audio_transcription.delta' && itemId) {

@@ -292,4 +292,42 @@ describe('RealtimeCapturePipeline', () => {
     );
     expect(calls.filter((call) => (call[3] as Set<string>).has('channel-ru'))).toHaveLength(2);
   });
+
+  it('publishes a complete sentence while retaining the next sentence fragment', async () => {
+    const calls: unknown[][] = [];
+    const engine = {
+      ingestSourceAudio: async () => undefined,
+      ingestLiveTranscript: async (...input: unknown[]) => {
+        calls.push(input);
+        return [];
+      },
+      reportChannelFailure: () => undefined,
+    } as unknown as SessionEngine;
+    const transcriber = new FakeTranscriber();
+    const pipeline = new RealtimeCapturePipeline(
+      engine,
+      cascadeSession(),
+      transcriber,
+      () => new FakeTranslationChannel(),
+    );
+    await pipeline.start();
+    transcriber.emit({
+      id: 'mixed-source',
+      sessionId: 'session-live-test',
+      channelId: 'source-ru',
+      language: 'ru',
+      text: 'Кротость — это внешняя реакция. Можно сказать',
+      sourceStartMs: 0,
+      sourceEndMs: 4_000,
+      emittedAt: new Date().toISOString(),
+      final: true,
+      sequence: 0,
+    });
+    await pipeline.close();
+
+    const cascadeTexts = calls
+      .filter((call) => (call[3] as Set<string>).has('channel-en'))
+      .map((call) => (call[0] as TranscriptSegment).text);
+    expect(cascadeTexts).toEqual(['Кротость — это внешняя реакция.', 'Можно сказать']);
+  });
 });

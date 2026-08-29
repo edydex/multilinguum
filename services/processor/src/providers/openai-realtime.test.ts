@@ -79,6 +79,7 @@ function session(): ServiceSession {
     },
     createdAt: new Date().toISOString(),
     relayRoom: 'service-test',
+    contextDocumentIds: [],
     archivePolicy: {
       retentionDays: 30,
       retainIndefinitely: false,
@@ -127,6 +128,7 @@ describe('OpenAI Realtime provider adapters', () => {
       connectionFactory: factory,
       secretProvider: { create: async () => 'short-lived-test-secret' },
       stopDrainMs: 0,
+      serverVad: false,
     });
     const segments: TranscriptSegment[] = [];
     transcriber.onSegment((segment) => segments.push(segment));
@@ -163,6 +165,40 @@ describe('OpenAI Realtime provider adapters', () => {
     expect(connection.sent[1]).toEqual({ type: 'input_audio_buffer.commit' });
     await transcriber.stop();
     expect(connection.closed).toBe(true);
+  });
+
+  it('uses server voice activity to finalize natural phrases without fixed-window commits', async () => {
+    const connection = new FakeRealtimeConnection();
+    const transcriber = new OpenAILiveTranscriber('not-used-in-test', 'gpt-live-transcribe', {
+      connectionFactory: () => connection,
+      secretProvider: { create: async () => 'short-lived-test-secret' },
+      stopDrainMs: 0,
+    });
+    const segments: TranscriptSegment[] = [];
+    transcriber.onSegment((segment) => segments.push(segment));
+
+    await transcriber.start(session());
+    await transcriber.pushAudio(captureChunk(3_000));
+    expect(connection.sent).toHaveLength(1);
+    connection.emit({
+      type: 'input_audio_buffer.speech_started',
+      item_id: 'vad-item',
+      audio_start_ms: 250,
+    });
+    connection.emit({
+      type: 'input_audio_buffer.speech_stopped',
+      item_id: 'vad-item',
+      audio_end_ms: 2_700,
+    });
+    connection.emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'vad-item',
+      transcript: 'Кротость — это внешняя реакция.',
+    });
+
+    expect(segments[0]).toMatchObject({ sourceStartMs: 250, sourceEndMs: 2_700 });
+    await transcriber.stop();
+    expect(connection.sent).toHaveLength(1);
   });
 
   it('normalizes translated transcript and 24 kHz PCM output without provider events leaking', async () => {
