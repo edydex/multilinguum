@@ -9,6 +9,7 @@ if (!apiKey) throw new Error('OPENAI_API_KEY is required.');
 const outputDirectory = process.env.BENCHMARK_OUTPUT_DIR ?? '/tmp/multilinguum-cloud-benchmark';
 const translationModel = process.env.OPENAI_TRANSLATE_MODEL ?? 'gpt-realtime-translate';
 const transcriptionModel = process.env.OPENAI_TRANSCRIBE_MODEL ?? 'gpt-live-transcribe';
+const realtimeSessionModel = process.env.OPENAI_REALTIME_SESSION_MODEL ?? 'gpt-realtime-2.1';
 const ttsModel = process.env.OPENAI_TTS_MODEL ?? 'gpt-4o-mini-tts';
 const targetLanguage = process.env.BENCHMARK_TARGET_LANGUAGE ?? 'en';
 const safetyIdentifier = 'multilinguum-synthetic-benchmark';
@@ -175,7 +176,7 @@ const translation = new RealtimeConnection(
   },
 );
 const transcription = new RealtimeConnection(
-  `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(transcriptionModel)}`,
+  `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(realtimeSessionModel)}`,
   (event) => {
     const now = Date.now();
     if (event.type === 'conversation.item.input_audio_transcription.delta') {
@@ -260,6 +261,7 @@ const report = {
   models: {
     translation: translationModel,
     transcription: transcriptionModel,
+    transcriptionSession: realtimeSessionModel,
     sourceSpeechGeneration: ttsModel,
   },
   timing: {
