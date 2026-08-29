@@ -35,7 +35,7 @@ The listener page has no operator routes. The Cloudflare edge refuses every unkn
 
 A profile cannot be used without a stored speaker, confirmation date, authorizer, permitted use, permitted languages, evidence reference, and active status. The first policy allows only RU to EN. Revocation updates the processor record and deletes the worker sample immediately.
 
-The current profile creation API stores metadata first. Operational tooling must install the sample on the worker only after the metadata is reviewed, then mark the profile ready.
+The operator's **Add cloned voice…** flow stores consent metadata first, hashes the selected sample in the console, streams it to the processor, and forwards it directly to the worker's encrypted profile store. The worker verifies the hash and active-consent header before installation; only a successful worker response marks the processor profile ready. Provider and encryption secrets never enter the desktop renderer.
 
 ## Capture transport
 
