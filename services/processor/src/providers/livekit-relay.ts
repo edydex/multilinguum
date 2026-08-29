@@ -102,7 +102,10 @@ export class LiveKitMediaRelay implements MediaRelay {
     if (existing) {
       return { channelId: config.id, roomName: session.relayRoom, trackName: existing.trackName };
     }
-    const source = new AudioSource(48000, 1, 1_000);
+    // Keep capture non-blocking for normal clause and 5-second source chunks.
+    // LiveKit still plays the queued PCM at real-time speed; the larger queue
+    // prevents relay backpressure from stalling transcription and captions.
+    const source = new AudioSource(48000, 1, 10_000);
     const trackName =
       config.voiceMode === 'source'
         ? `source-${config.targetLanguage}`

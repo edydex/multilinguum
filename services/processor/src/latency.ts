@@ -52,7 +52,7 @@ export function buildLatencyBreakdown(
     }
     if (sample.audioPublish) {
       metrics.sourceEndToAudioMs = Math.round(
-        sample.audioPublish.completedAtUnixMs - sample.captureCompletedAtUnixMs,
+        sample.audioPublish.startedAtUnixMs - sample.captureCompletedAtUnixMs,
       );
       metrics.sourceStartToAudioMs = metrics.sourceEndToAudioMs + metrics.chunkWindowMs;
     }

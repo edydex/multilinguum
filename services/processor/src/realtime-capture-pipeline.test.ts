@@ -157,7 +157,7 @@ describe('RealtimeCapturePipeline', () => {
     const pipeline = new RealtimeCapturePipeline(engine, session, transcriber, () => translation);
 
     await pipeline.start();
-    pipeline.push(new Uint8Array(48_000 * 5 * 2), Date.now());
+    pipeline.push(new Uint8Array(48_000 * 5 * 2), 10_000);
     transcriber.emit({
       id: 'source-1',
       sessionId: session.id,
@@ -202,6 +202,15 @@ describe('RealtimeCapturePipeline', () => {
     expect(translation.pushed).toHaveLength(1);
     expect(sourceAudio).toHaveLength(1);
     expect(sourceTranscripts).toHaveLength(1);
+    expect(sourceTranscripts[0]).toEqual([
+      expect.any(Object),
+      expect.objectContaining({
+        captureCompletedAtUnixMs: 6_600,
+        chunkReadyAtUnixMs: 6_600,
+        transcription: expect.objectContaining({ startedAtUnixMs: 6_600 }),
+      }),
+      expect.any(Set),
+    ]);
     expect(translatedTranscripts).toEqual([
       [
         'channel-en',

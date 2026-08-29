@@ -566,6 +566,9 @@ export function App() {
                   const channelId = liveConfig?.id ?? `channel-${language}`;
                   const itemHealth = health[channelId];
                   const caption = captions[channelId];
+                  const sttP95 =
+                    itemHealth?.latency?.p95.sourceEndToTranscriptMs ??
+                    itemHealth?.latency?.p95.transcriptionMs;
                   const isSource =
                     liveConfig?.voiceMode === 'source' || language === configuredSource;
                   const availableProfiles = voiceProfiles.filter(
@@ -664,11 +667,7 @@ export function App() {
                       <div className="metrics">
                         <span>{itemHealth?.listenerCount ?? 0} listeners</span>
                         <span>E2E {formatLatency(itemHealth?.latencyMs ?? 0)}</span>
-                        {itemHealth?.latency?.p95.transcriptionMs !== undefined && (
-                          <span>
-                            STT p95 {formatLatency(itemHealth.latency.p95.transcriptionMs)}
-                          </span>
-                        )}
+                        {sttP95 !== undefined && <span>STT p95 {formatLatency(sttP95)}</span>}
                         {itemHealth?.latency?.p95.translationMs !== undefined && (
                           <span>
                             Translate p95 {formatLatency(itemHealth.latency.p95.translationMs)}

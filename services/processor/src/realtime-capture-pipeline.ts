@@ -20,6 +20,11 @@ interface TranscriptBuffer {
   sequence: number;
 }
 
+interface CapturePoint {
+  endMs: number;
+  capturedAtUnixMs: number;
+}
+
 export type RealtimeTranslationChannelFactory = () => RealtimeTranslationChannel;
 
 export class RealtimeCapturePipeline {
@@ -32,6 +37,7 @@ export class RealtimeCapturePipeline {
   readonly #transcriptBuffers = new Map<string, TranscriptBuffer>();
   readonly #transcriptSequences = new Map<string, number>();
   readonly #audioChains = new Map<string, Promise<void>>();
+  readonly #captureTimeline: CapturePoint[] = [];
   readonly #unsubscribers: Array<() => void> = [];
   #pendingSource = new Uint8Array();
   #processedSamples = 0;
@@ -109,6 +115,10 @@ export class RealtimeCapturePipeline {
       endMs,
       sequence: this.#frameSequence++,
     };
+    this.#captureTimeline.push({ endMs, capturedAtUnixMs });
+    while (this.#captureTimeline.length > 1 && this.#captureTimeline[0]!.endMs < endMs - 120_000) {
+      this.#captureTimeline.shift();
+    }
     this.#latestCapturedAtUnixMs = capturedAtUnixMs;
     this.#inputChain = this.#inputChain
       .then(async () => {
@@ -188,16 +198,24 @@ export class RealtimeCapturePipeline {
 
   #receiveSourceTranscript(segment: TranscriptSegment): void {
     const completedAtUnixMs = Date.parse(segment.emittedAt);
+    const captureCompletedAtUnixMs = this.#captureTimestamp(segment.sourceEndMs);
     this.#sourceTranscriptChain = this.#sourceTranscriptChain
       .then(async () => {
         await this.#engine.ingestLiveTranscript(
           segment,
           {
+            ...(captureCompletedAtUnixMs !== undefined
+              ? {
+                  captureCompletedAtUnixMs,
+                  chunkReadyAtUnixMs: captureCompletedAtUnixMs,
+                }
+              : {}),
             transcriptionEngine: this.#transcriber.name,
             transcription: {
               startedAtUnixMs:
+                captureCompletedAtUnixMs ??
                 Date.parse(this.#session.startedAt ?? this.#session.createdAt) +
-                segment.sourceStartMs,
+                  segment.sourceEndMs,
               ...(segment.firstDeltaAtUnixMs !== undefined
                 ? { firstDeltaAtUnixMs: segment.firstDeltaAtUnixMs }
                 : {}),
@@ -215,6 +233,12 @@ export class RealtimeCapturePipeline {
           error instanceof Error ? error : new Error(String(error)),
         );
       });
+  }
+
+  #captureTimestamp(sourceEndMs: number): number | undefined {
+    const point = this.#captureTimeline.find((candidate) => candidate.endMs >= sourceEndMs);
+    if (!point) return undefined;
+    return Math.round(point.capturedAtUnixMs - Math.max(0, point.endMs - sourceEndMs));
   }
 
   #receiveTranslatedDelta(delta: RealtimeTranscriptDelta): void {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { PipelineLatencySample } from '@multilinguum/protocol';
-import { summarizeLatency } from './latency.js';
+import { buildLatencyBreakdown, summarizeLatency } from './latency.js';
 
 function sample(index: number): PipelineLatencySample {
   return {
@@ -24,6 +24,27 @@ function sample(index: number): PipelineLatencySample {
 }
 
 describe('latency summary', () => {
+  it('measures first queued audio as the listener-start latency', () => {
+    const metrics = buildLatencyBreakdown({
+      id: 'sample',
+      sessionId: 'session',
+      channelId: 'channel-en',
+      language: 'en',
+      sequence: 0,
+      sourceStartMs: 0,
+      sourceEndMs: 2_000,
+      recordedAt: new Date(0).toISOString(),
+      captureCompletedAtUnixMs: 10_000,
+      audioPublish: { startedAtUnixMs: 12_500, completedAtUnixMs: 12_900 },
+      engines: { relay: 'test' },
+      outcome: 'complete',
+    });
+
+    expect(metrics.sourceEndToAudioMs).toBe(2_500);
+    expect(metrics.sourceStartToAudioMs).toBe(4_500);
+    expect(metrics.audioPublishMs).toBe(400);
+  });
+
   it('uses nearest-rank p50 and p95 without mixing unavailable stages', () => {
     const summary = summarizeLatency(Array.from({ length: 20 }, (_, index) => sample(index + 1)));
 
