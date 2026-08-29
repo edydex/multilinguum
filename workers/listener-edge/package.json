@@ -1,0 +1,16 @@
+{
+  "name": "@multilinguum/listener-edge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "XDG_CONFIG_HOME=.wrangler-cache WRANGLER_WRITE_LOGS=false wrangler deploy --dry-run --outdir dist",
+    "dev": "XDG_CONFIG_HOME=.wrangler-cache wrangler dev",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260829.1",
+    "wrangler": "^4.127.1"
+  }
+}

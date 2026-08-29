@@ -1,0 +1,28 @@
+{
+  "name": "@multilinguum/processor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx watch src/main.ts",
+    "start": "node dist/main.js",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@fastify/cors": "^11.1.0",
+    "@fastify/websocket": "^11.2.0",
+    "@livekit/rtc-node": "^0.13.24",
+    "@multilinguum/protocol": "workspace:*",
+    "fastify": "^5.5.0",
+    "livekit-server-sdk": "^2.14.0",
+    "openai": "^7.8.0",
+    "ws": "^8.18.3",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.5"
+  }
+}

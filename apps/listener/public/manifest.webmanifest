@@ -1,0 +1,9 @@
+{
+  "name": "Word of Truth Live Translation",
+  "short_name": "Translation",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f5f0e6",
+  "theme_color": "#172c27",
+  "icons": []
+}

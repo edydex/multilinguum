@@ -1,0 +1,13 @@
+.git
+.github
+.pnpm-store
+**/.venv
+**/node_modules
+**/dist
+**/target
+.env
+.env.*
+!.env.example
+data
+fixtures/private
+*.log

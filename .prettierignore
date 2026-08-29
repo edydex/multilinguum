@@ -1,0 +1,8 @@
+node_modules
+dist
+target
+coverage
+fixtures/private
+data
+pnpm-lock.yaml
+LICENSE

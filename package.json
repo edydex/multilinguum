@@ -1,0 +1,27 @@
+{
+  "name": "multilinguum",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Low-latency, service-ready AI translation for multilingual church services.",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@11.19.0",
+  "engines": {
+    "node": ">=24.0.0",
+    "pnpm": ">=11.0.0"
+  },
+  "scripts": {
+    "build": "pnpm --filter @multilinguum/protocol build && pnpm --filter @multilinguum/processor build && pnpm --filter @multilinguum/operator build && pnpm --filter @multilinguum/listener build && pnpm --filter @multilinguum/listener-edge build",
+    "dev": "pnpm --filter @multilinguum/processor --filter @multilinguum/operator --filter @multilinguum/listener --parallel dev",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm --filter @multilinguum/protocol build && pnpm -r --if-present test",
+    "typecheck": "pnpm --filter @multilinguum/protocol build && pnpm -r --if-present typecheck",
+    "check": "pnpm format:check && pnpm typecheck && pnpm test && pnpm build"
+  },
+  "devDependencies": {
+    "@types/node": "^24.3.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "source": {
+    "url": "https://www.youtube.com/watch?v=rULLyk5e8Yg",
+    "videoId": "rULLyk5e8Yg",
+    "channel": "Word of Truth Bible Church",
+    "language": "ru",
+    "authorization": "The preacher explicitly asked the project owner to set up translation."
+  },
+  "excerpt": {
+    "start": "00:08:00",
+    "end": "00:08:45",
+    "expectedDurationSeconds": 45,
+    "expectedWavSha256": "f8bfae7555bbecebb92a43decdb44289867a56a6e43e7443586ea7ac9c6bb0f0"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "segments": [
+    {
+      "text": "Благодать вам и мир от Бога Отца нашего.",
+      "sourceStartMs": 0,
+      "sourceEndMs": 2700,
+      "final": true,
+      "sequence": 0
+    },
+    {
+      "text": "Сегодня мы откроем Евангелие и будем внимательно читать Слово Божие.",
+      "sourceStartMs": 2800,
+      "sourceEndMs": 7200,
+      "final": true,
+      "sequence": 1
+    }
+  ]
+}

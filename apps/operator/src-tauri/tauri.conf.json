@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Multilinguum",
+  "version": "0.1.0",
+  "identifier": "ai.multilinguum.operator",
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "pnpm build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Multilinguum",
+        "width": 1380,
+        "height": 900,
+        "minWidth": 1080,
+        "minHeight": 720,
+        "resizable": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:* https: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self' blob: https:; script-src 'self'"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "dmg",
+    "icon": ["icons/icon.png"],
+    "category": "Utility",
+    "copyright": "Copyright 2026 Multilinguum contributors",
+    "macOS": {
+      "minimumSystemVersion": "13.0",
+      "infoPlist": "Info.plist"
+    }
+  }
+}
