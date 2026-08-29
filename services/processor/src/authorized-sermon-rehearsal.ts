@@ -210,8 +210,8 @@ await requestJson('/api/sessions/current/start', {});
 const events: Array<{ atUnixMs: number; event: ProcessorEvent }> = [];
 let lastEventAt = Date.now();
 const eventSocketUrl = websocketUrl('/api/operator/events');
-eventSocketUrl.searchParams.set('token', controlToken);
-const eventSocket = new WebSocket(eventSocketUrl);
+const controlProtocol = `multilinguum-auth.${controlToken}`;
+const eventSocket = new WebSocket(eventSocketUrl, controlProtocol);
 eventSocket.on('message', (data: RawData) => {
   try {
     const event = JSON.parse(data.toString()) as ProcessorEvent;
@@ -224,9 +224,8 @@ eventSocket.on('message', (data: RawData) => {
 await openSocket(eventSocket);
 
 const captureUrl = websocketUrl('/api/capture/audio');
-captureUrl.searchParams.set('token', controlToken);
 captureUrl.searchParams.set('sessionId', session.id);
-const captureSocket = new WebSocket(captureUrl);
+const captureSocket = new WebSocket(captureUrl, controlProtocol);
 await openSocket(captureSocket);
 
 const streamStartedAtUnixMs = Date.now();

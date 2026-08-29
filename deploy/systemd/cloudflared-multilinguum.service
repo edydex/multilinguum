@@ -1,0 +1,14 @@
+[Unit]
+Description=Multilinguum Cloudflare Tunnel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+TimeoutStartSec=30
+ExecStart=/usr/local/bin/cloudflared --no-autoupdate tunnel run --token-file /etc/multilinguum/cloudflared-tunnel.token
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

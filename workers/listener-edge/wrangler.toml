@@ -3,10 +3,14 @@ main = "src/index.ts"
 compatibility_date = "2026-08-01"
 workers_dev = true
 
+[[routes]]
+pattern = "translate.mayos.dev"
+custom_domain = true
+
 [assets]
 directory = "../../apps/listener/dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 
 [vars]
-PROCESSOR_PUBLIC_ORIGIN = "https://processor.example.invalid"
+PROCESSOR_PUBLIC_ORIGIN = "https://processor-multilinguum.mayos.dev"

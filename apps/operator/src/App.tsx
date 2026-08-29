@@ -12,6 +12,7 @@ import type {
 import { api, subscribe, type OperatorConnection } from './api';
 import { useAudioMeter } from './useAudioMeter';
 import { useAudioStreamer } from './useAudioStreamer';
+import { dbToMeterPercent, signalStatus } from './audioLevel';
 
 const names: Record<Language, string> = {
   en: 'English',
@@ -98,15 +99,24 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [playbackUrl, setPlaybackUrl] = useState<string>();
-  const { devices, level, error: audioError } = useAudioMeter(selectedDeviceId);
+  const audio = useAudioMeter(selectedDeviceId);
+  const {
+    devices,
+    levelDb,
+    activeChannel,
+    channelCount,
+    sampleRate,
+    subscribePcm,
+    error: audioError,
+  } = audio;
 
   const connection = useMemo<OperatorConnection>(() => ({ baseUrl, token }), [baseUrl, token]);
   const live = session?.state === 'live' || session?.state === 'starting';
   const capture = useAudioStreamer(
     session?.state === 'live',
     session?.id,
-    selectedDeviceId,
     connection,
+    subscribePcm,
   );
 
   const refresh = useCallback(async () => {
@@ -415,7 +425,7 @@ export function App() {
                     <h2>Mixer feed</h2>
                   </div>
                   <span className="ok">
-                    {capture.streaming ? 'Streaming · 48 kHz mono' : '48 kHz mono'}
+                    {capture.streaming ? 'Streaming' : 'Ready'} · 48 kHz mono · shared input
                   </span>
                 </div>
                 <label>
@@ -433,19 +443,24 @@ export function App() {
                     ))}
                   </select>
                 </label>
-                <div
-                  className="meter"
-                  aria-label={`Input level ${Math.round(level * 100)} percent`}
-                >
-                  <span style={{ width: `${Math.max(2, level * 100)}%` }} />
+                <div className="meter" aria-label={`Input level ${levelDb.toFixed(1)} dBFS`}>
+                  <span style={{ width: `${Math.max(1, dbToMeterPercent(levelDb))}%` }} />
                 </div>
                 <div className="meter-labels">
                   <span>-60 dB</span>
                   <strong>
-                    {level > 0.7 ? 'Hot' : level > 0.08 ? 'Good signal' : 'Waiting for signal'}
+                    {levelDb.toFixed(1)} dBFS · {signalStatus(levelDb)}
                   </strong>
                   <span>0 dB</span>
                 </div>
+                <p className="field-note">
+                  {Math.round(sampleRate / 1_000)} kHz device ·{' '}
+                  {channelCount > 1
+                    ? `using channel ${activeChannel + 1} of ${channelCount}`
+                    : 'single input channel'}
+                  . Multilinguum opens one shared read-only capture stream; OBS may use the same
+                  device.
+                </p>
               </section>
 
               <section className="panel">

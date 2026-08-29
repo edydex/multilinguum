@@ -45,6 +45,18 @@ function hasControlToken(request: FastifyRequest, expected: string): boolean {
   return left.length === right.length && timingSafeEqual(left, right);
 }
 
+function webSocketControlToken(request: FastifyRequest): string {
+  const header = request.headers['sec-websocket-protocol'];
+  const protocols = (Array.isArray(header) ? header.join(',') : (header ?? ''))
+    .split(',')
+    .map((value) => value.trim());
+  return (
+    protocols
+      .find((protocol) => protocol.startsWith('multilinguum-auth.'))
+      ?.slice('multilinguum-auth.'.length) ?? ''
+  );
+}
+
 function publicState(config: ProcessorConfig, engine: SessionEngine): PublicServiceState {
   const session = engine.current();
   const active = session?.state === 'live';
@@ -77,7 +89,11 @@ export async function buildServer(config: ProcessorConfig) {
     (_request, body, done) => done(null, body),
   );
   await app.register(cors, {
-    origin: config.NODE_ENV === 'production' ? config.PROCESSOR_PUBLIC_URL : true,
+    origin:
+      config.NODE_ENV === 'production'
+        ? (origin, callback) =>
+            callback(null, origin === undefined || config.OPERATOR_ALLOWED_ORIGINS.includes(origin))
+        : true,
   });
   await app.register(websocket);
 
@@ -226,7 +242,7 @@ export async function buildServer(config: ProcessorConfig) {
   });
 
   app.get('/api/operator/events', { websocket: true }, (socket, request) => {
-    const token = (request.query as { token?: string }).token ?? '';
+    const token = webSocketControlToken(request);
     const left = Buffer.from(token);
     const right = Buffer.from(config.PROCESSOR_CONTROL_TOKEN);
     if (left.length !== right.length || !timingSafeEqual(left, right)) {
@@ -244,8 +260,8 @@ export async function buildServer(config: ProcessorConfig) {
 
   let captureActive = false;
   app.get('/api/capture/audio', { websocket: true }, (socket, request) => {
-    const query = request.query as { token?: string; sessionId?: string };
-    const supplied = Buffer.from(query.token ?? '');
+    const query = request.query as { sessionId?: string };
+    const supplied = Buffer.from(webSocketControlToken(request));
     const expected = Buffer.from(config.PROCESSOR_CONTROL_TOKEN);
     const session = engine.current();
     if (

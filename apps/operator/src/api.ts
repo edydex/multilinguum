@@ -11,6 +11,10 @@ export interface OperatorConnection {
   token: string;
 }
 
+export function controlWebSocketProtocol(token: string): string {
+  return `multilinguum-auth.${token}`;
+}
+
 async function request<T>(
   connection: OperatorConnection,
   path: string,
@@ -138,8 +142,7 @@ export function subscribe(
   const connect = () => {
     const url = new URL('/api/operator/events', connection.baseUrl);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    url.searchParams.set('token', connection.token);
-    socket = new WebSocket(url);
+    socket = new WebSocket(url, controlWebSocketProtocol(connection.token));
     socket.onopen = () => {
       retryDelayMs = 1_000;
       onState(true);

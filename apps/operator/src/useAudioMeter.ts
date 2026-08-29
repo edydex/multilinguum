@@ -1,27 +1,56 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { rmsToDb, smoothDb } from './audioLevel';
 
 export interface AudioDevice {
   id: string;
   label: string;
 }
 
+export interface CapturedPcmFrame {
+  pcm: ArrayBuffer;
+  capturedAtUnixMs: number;
+}
+
+interface WorkletFrame {
+  pcm: ArrayBuffer;
+  rms: number;
+  peak: number;
+  channel: number;
+  channelCount: number;
+}
+
+type PcmListener = (frame: CapturedPcmFrame) => void;
+
 export function useAudioMeter(selectedDeviceId?: string) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
-  const [level, setLevel] = useState(0);
+  const [levelDb, setLevelDb] = useState(-60);
+  const [activeChannel, setActiveChannel] = useState(0);
+  const [channelCount, setChannelCount] = useState(0);
+  const [sampleRate, setSampleRate] = useState(48_000);
   const [error, setError] = useState<string>();
+  const listeners = useRef(new Set<PcmListener>());
+
+  const subscribePcm = useCallback((listener: PcmListener) => {
+    listeners.current.add(listener);
+    return () => listeners.current.delete(listener);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
     let stream: MediaStream | undefined;
     let context: AudioContext | undefined;
-    let frame = 0;
+    let processor: AudioWorkletNode | undefined;
+    let lastMeterUpdate = 0;
+    let smoothedDb = -60;
 
     const start = async () => {
       try {
         const constraints: MediaTrackConstraints = {
           ...(selectedDeviceId ? { deviceId: { exact: selectedDeviceId } } : {}),
-          channelCount: 1,
-          sampleRate: 48000,
+          // Keep the device's native layout so a feed wired to channel 2 is not lost.
+          // The worklet selects the stronger channel and emits 48 kHz mono PCM.
+          channelCount: { ideal: 2 },
+          sampleRate: { ideal: 48_000 },
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
@@ -38,21 +67,33 @@ export function useAudioMeter(selectedDeviceId?: string) {
               })),
           );
         }
-        context = new AudioContext({ sampleRate: 48000 });
+        const settings = stream.getAudioTracks()[0]?.getSettings();
+        if (!cancelled) {
+          setSampleRate(settings?.sampleRate ?? 48_000);
+          setError(undefined);
+        }
+        context = new AudioContext({ sampleRate: 48_000 });
+        await context.audioWorklet.addModule('/pcm-worklet.js');
         const source = context.createMediaStreamSource(stream);
-        const analyser = context.createAnalyser();
-        analyser.fftSize = 1024;
-        source.connect(analyser);
-        const samples = new Float32Array(analyser.fftSize);
-        const measure = () => {
-          analyser.getFloatTimeDomainData(samples);
-          const rms = Math.sqrt(
-            samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length,
-          );
-          if (!cancelled) setLevel(Math.min(1, rms * 4));
-          frame = requestAnimationFrame(measure);
+        processor = new AudioWorkletNode(context, 'multilinguum-pcm');
+        const silent = context.createGain();
+        silent.gain.value = 0;
+        source.connect(processor);
+        processor.connect(silent).connect(context.destination);
+        processor.port.onmessage = (message: MessageEvent<WorkletFrame>) => {
+          if (cancelled) return;
+          const receivedAt = Date.now();
+          const nextDb = rmsToDb(message.data.rms);
+          smoothedDb = smoothDb(smoothedDb, nextDb);
+          if (receivedAt - lastMeterUpdate >= 50) {
+            lastMeterUpdate = receivedAt;
+            setLevelDb(smoothedDb);
+            setActiveChannel(message.data.channel);
+            setChannelCount(message.data.channelCount);
+          }
+          const frame = { pcm: message.data.pcm, capturedAtUnixMs: receivedAt };
+          for (const listener of listeners.current) listener(frame);
         };
-        measure();
       } catch (cause) {
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
       }
@@ -60,11 +101,19 @@ export function useAudioMeter(selectedDeviceId?: string) {
     void start();
     return () => {
       cancelled = true;
-      cancelAnimationFrame(frame);
+      processor?.disconnect();
       stream?.getTracks().forEach((track) => track.stop());
       void context?.close();
     };
   }, [selectedDeviceId]);
 
-  return { devices, level, error };
+  return {
+    devices,
+    levelDb,
+    activeChannel,
+    channelCount,
+    sampleRate,
+    subscribePcm,
+    error,
+  };
 }
