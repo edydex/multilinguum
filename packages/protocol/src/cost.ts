@@ -9,7 +9,7 @@ export function estimateCloudServiceCost(
 ): number {
   const translatedChannels = channels.filter(
     (channel) =>
-      channel.voiceMode !== 'source' && channel.translationProvider === 'openai-realtime',
+      channel.voiceMode !== 'source' && channel.translationProvider.startsWith('openai-'),
   ).length;
   const usesCloud = channels.some((channel) => channel.translationProvider.startsWith('openai-'));
   const transcribeCost = usesCloud ? durationMinutes * liveTranscribePerMinuteUsd : 0;

@@ -20,6 +20,7 @@ This document distinguishes implemented code from claims that require external s
 - A paid synthetic RU to EN streaming benchmark exercised `gpt-live-transcribe` and `gpt-realtime-translate` concurrently with stage timing and retained audio/report evidence.
 - A glossary-aware `gpt-5.6-terra` benchmark corrected both meaning-sensitive errors observed in direct realtime output; its 117 input and 42 output tokens were verified in the dashboard as complimentary data-sharing incentive traffic with $0 model cost.
 - The live capture route now owns one shared GPT-Live-Transcribe session plus one GPT-Realtime-Translate session per active natural-voice target. Provider events are normalized behind shared contracts, 48 kHz capture is converted to 24 kHz API audio, returned PCM is converted back to the 48 kHz relay/archive format, and replay tests cover source VAD timing, transcript clauses, audio, and per-channel fallback isolation.
+- The operator defaults translated channels to the glossary-aware accuracy path and labels the direct path as fast/experimental. Cloned voice is locked to finalized glossary-aware clauses. Both paths retain the conservative two-hour cloud estimate until measured cascade cost replaces the planning baseline.
 
 ## Implemented but not externally verified
 
@@ -42,6 +43,7 @@ The `vr-mayos` SSH target resolves to the throwaway `video-redactor-gpu` Debian 
 - The approved Opus artifact SHA-256 is `4c0b5a089435f9e07d10c999caccc94730b94e08b407917d1b2b0092850279e6`.
 - Revocation was exercised independently and blocked rendering; a consented ready profile is installed for the authorized preacher.
 - The project owner subsequently reported renewed preacher approval of the tested identity and naturalness. The committed fixture records that approval without inventing a numeric score.
+- The processor uses a key from the non-sharing `Multilinguum Production Private` API project. The sharing-enabled development project is retained only for synthetic benchmarks and complimentary eligible text requests.
 
 This closes the hardware installation and basic cloned-voice feasibility gate. It does not close the two-hour latency/load gate or venue acceptance.
 

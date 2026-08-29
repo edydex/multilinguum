@@ -6,10 +6,11 @@ Multilinguum production calls require an OpenAI API project. ChatGPT or Codex us
 
 1. Sign in to the [API Platform billing overview](https://platform.openai.com/settings/organization/billing/overview).
 2. If the existing USD 20 balance is shown there, do not buy more credit. If it is shown only in ChatGPT or Codex, add API billing separately and keep automatic recharge disabled for the spike.
-3. Create a dedicated project named `Multilinguum`; do not reuse an unrelated development project's key.
-4. Set the project budget alert to USD 20.
-5. Create a project service account named `multilinguum-processor` and copy its project-scoped API key once.
-6. Do not paste the key into chat, a repository file, a command argument, or a screenshot.
+3. Create a development project named `Multilinguum` for synthetic fixtures and optional data-sharing incentive traffic.
+4. Create a separate project named `Multilinguum Production Private` and keep it excluded from input/output sharing. Real sermons and preacher audio use only this project.
+5. Set the project budget alert to USD 20.
+6. Create a project service account named `multilinguum-production-processor` and copy its project-scoped API key once.
+7. Do not paste the key into chat, a repository file, a command argument, or a screenshot.
 
 Official OpenAI documentation describes [API-key authentication](https://developers.openai.com/api/reference/overview#authentication), [project service accounts and keys](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/projects), and [project usage/cost reporting](https://developers.openai.com/api/reference/resources/admin/subresources/organization/subresources/usage).
 
@@ -34,6 +35,8 @@ The direct [GPT-Realtime-Translate](https://developers.openai.com/api/docs/model
 When the organization explicitly enables input/output sharing for the Multilinguum project and the dashboard says it is enrolled, eligible text-model traffic receives complimentary daily tokens automatically. The [official program terms](https://help.openai.com/en/articles/10306912-sharing-feedback-evals-and-api-data-with-openai) currently include `gpt-5.6-terra` in the 10M-token group (2.5M/day for usage tiers 1–2), but do not list Realtime Translate, Live Transcribe, or TTS. This can make the fallback cascade's text-translation stage complimentary; audio stages remain separately billed.
 
 Only synthetic, public, or separately authorized data should use a sharing-enabled project. Open-source application code does not make sermon recordings or voice profiles public or authorize their use for model improvement.
+
+The deployed processor follows this split: synthetic benchmarks used the sharing-enabled development project, while the active processor key belongs to `Multilinguum Production Private`, which was verified absent from the selected-project sharing list. The key is stored only in the processor's mode-`0600` environment file.
 
 Run the isolated eligibility and glossary check on the processor host with:
 

@@ -4,6 +4,7 @@ import type {
   ChannelConfig,
   ChannelHealth,
   Language,
+  ProviderKind,
   ProcessorEvent,
   ServiceSession,
   TranscriptSegment,
@@ -25,6 +26,7 @@ const allLanguages: Language[] = ['en', 'ru', 'es', 'uk'];
 interface TargetDraft {
   enabled: boolean;
   voiceMode: VoiceMode;
+  provider: Extract<ProviderKind, 'openai-cascade' | 'openai-realtime'>;
   profileId: string;
 }
 
@@ -35,6 +37,7 @@ function initialTargets(source: 'en' | 'ru'): Record<Language, TargetDraft> {
       {
         enabled: true,
         voiceMode: language === source ? 'source' : 'natural',
+        provider: 'openai-cascade',
         profileId: '',
       },
     ]),
@@ -197,12 +200,17 @@ export function App() {
           return {
             id: `channel-${language}`,
             targetLanguage: language,
-            translationProvider: 'openai-realtime',
+            translationProvider:
+              language === source
+                ? 'deterministic'
+                : draft.voiceMode === 'cloned'
+                  ? 'openai-cascade'
+                  : draft.provider,
             voiceMode: language === source ? 'source' : draft.voiceMode,
             ...(draft.voiceMode === 'cloned' && draft.profileId
               ? { voiceProfileId: draft.profileId }
               : {}),
-            fallbackOrder: draft.voiceMode === 'cloned' ? ['natural', 'mute'] : ['mute'],
+            fallbackOrder: language === source ? ['mute'] : ['natural', 'mute'],
             muted: false,
           };
         });
@@ -448,6 +456,9 @@ export function App() {
                               [language]: {
                                 ...current[language]!,
                                 voiceMode: event.target.value as VoiceMode,
+                                ...(event.target.value === 'cloned'
+                                  ? { provider: 'openai-cascade' as const }
+                                  : {}),
                               },
                             }))
                           }
@@ -459,6 +470,34 @@ export function App() {
                           )}
                         </select>
                       </label>
+                      {!isSource && (
+                        <label>
+                          Translation path
+                          <select
+                            value={draft.voiceMode === 'cloned' ? 'openai-cascade' : draft.provider}
+                            disabled={live || !draft.enabled || draft.voiceMode === 'cloned'}
+                            onChange={(event) =>
+                              setTargets((current) => ({
+                                ...current,
+                                [language]: {
+                                  ...current[language]!,
+                                  provider: event.target.value as TargetDraft['provider'],
+                                },
+                              }))
+                            }
+                          >
+                            <option value="openai-cascade">Accurate · glossary</option>
+                            <option value="openai-realtime">Fast · experimental</option>
+                          </select>
+                          <span className="field-note">
+                            {draft.voiceMode === 'cloned'
+                              ? 'Cloned voice requires finalized, glossary-checked clauses.'
+                              : draft.provider === 'openai-realtime'
+                                ? 'Lowest delay, but the RU→EN spike changed a meaning-sensitive phrase.'
+                                : 'Recommended for sermon accuracy; typically adds a short clause delay.'}
+                          </span>
+                        </label>
+                      )}
                       {draft.voiceMode === 'cloned' && !isSource && (
                         <label>
                           Voice profile ID

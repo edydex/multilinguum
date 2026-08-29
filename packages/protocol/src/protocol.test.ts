@@ -28,5 +28,14 @@ describe('service estimate', () => {
     }));
 
     expect(estimateCloudServiceCost(120, channels)).toBe(14.28);
+    expect(
+      estimateCloudServiceCost(
+        120,
+        channels.map((channel) => ({
+          ...channel,
+          translationProvider: 'openai-cascade' as const,
+        })),
+      ),
+    ).toBe(14.28);
   });
 });
