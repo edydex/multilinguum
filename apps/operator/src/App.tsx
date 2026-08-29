@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import type {
   ArchiveManifest,
   ChannelConfig,
@@ -121,6 +122,17 @@ export function App() {
     connection,
     subscribePcm,
   );
+
+  useEffect(() => {
+    void invoke<{ processorUrl?: string; processorToken?: string }>('bootstrap_connection')
+      .then((bootstrap) => {
+        if (bootstrap.processorUrl) setBaseUrl(bootstrap.processorUrl);
+        if (bootstrap.processorToken) setToken(bootstrap.processorToken);
+      })
+      .catch(() => {
+        // The same React UI can run in a browser during development, where Tauri IPC is absent.
+      });
+  }, []);
 
   const refresh = useCallback(async () => {
     try {

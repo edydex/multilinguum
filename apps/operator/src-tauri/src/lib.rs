@@ -8,6 +8,21 @@ struct AudioInput {
     is_default: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapConnection {
+    processor_url: Option<String>,
+    processor_token: Option<String>,
+}
+
+#[tauri::command]
+fn bootstrap_connection() -> BootstrapConnection {
+    BootstrapConnection {
+        processor_url: std::env::var("MULTILINGUUM_PROCESSOR_URL").ok(),
+        processor_token: std::env::var("MULTILINGUUM_PROCESSOR_TOKEN").ok(),
+    }
+}
+
 #[tauri::command]
 fn list_audio_inputs() -> Result<Vec<AudioInput>, String> {
     let host = cpal::default_host();
@@ -29,7 +44,10 @@ fn list_audio_inputs() -> Result<Vec<AudioInput>, String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![list_audio_inputs])
+        .invoke_handler(tauri::generate_handler![
+            bootstrap_connection,
+            list_audio_inputs
+        ])
         .run(tauri::generate_context!())
         .expect("error while running Multilinguum operator console");
 }
