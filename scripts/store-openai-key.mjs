@@ -29,7 +29,11 @@ if (!replaced) updatedLines.push(`OPENAI_API_KEY=${key}`);
 
 const temporary = `${envPath}.tmp.${process.pid}`;
 try {
-  await writeFile(temporary, updatedLines.join('\n'), { encoding: 'utf8', mode: 0o600, flag: 'wx' });
+  await writeFile(temporary, updatedLines.join('\n'), {
+    encoding: 'utf8',
+    mode: 0o600,
+    flag: 'wx',
+  });
   await chmod(temporary, 0o600);
   await rename(temporary, envPath);
   await chmod(envPath, 0o600);
