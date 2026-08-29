@@ -317,13 +317,17 @@ export async function buildServer(config: ProcessorConfig) {
       realtimeTranscriberFactory(),
       realtimeTranslationFactory,
     );
-    const ready = pipeline.start();
+    let startupError: Error | undefined;
+    const ready = pipeline.start().catch((error) => {
+      startupError = error instanceof Error ? error : new Error(String(error));
+      if (socket.readyState === socket.OPEN) socket.close(1013, startupError.message);
+    });
     let acceptingFrames = true;
     let closePromise: Promise<void> | undefined;
     const closePipeline = () => {
       acceptingFrames = false;
       closePromise ??= ready
-        .then(() => pipeline.close())
+        .then(() => (startupError ? undefined : pipeline.close()))
         .finally(() => {
           if (activeCapture?.socket === socket) activeCapture = undefined;
         });
@@ -346,7 +350,10 @@ export async function buildServer(config: ProcessorConfig) {
         }
         const frame = new Uint8Array(packet.buffer, packet.byteOffset + 16, sampleCount * 2);
         void ready
-          .then(() => pipeline.push(frame, capturedAt))
+          .then(() => {
+            if (startupError) throw startupError;
+            pipeline.push(frame, capturedAt);
+          })
           .catch((error) =>
             socket.close(
               1013,
