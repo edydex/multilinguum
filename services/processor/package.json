@@ -8,6 +8,7 @@
     "benchmark:cloud": "node dist/cloud-benchmark.js",
     "benchmark:complimentary": "node dist/complimentary-benchmark.js",
     "rehearse:authorized-sermon": "node dist/authorized-sermon-rehearsal.js",
+    "reference:authorized-sermon": "node dist/authorized-sermon-quality-reference.js",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest run",
