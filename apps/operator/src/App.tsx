@@ -773,7 +773,7 @@ export function App() {
                             : draft.outputMode === 'generic-fast'
                               ? 'Lowest delay. Speaks while the translation is arriving, with less reliable clause-level cadence.'
                               : draft.outputMode === 'generic-expressive'
-                                ? 'Recommended. Joins four-second transcription windows at sentence punctuation so complete thoughts are narrated together; an 8-second safety cap handles very long sentences.'
+                                ? 'Recommended. Transcribes up to eight seconds of speech, then narrates only at sentence punctuation so words and complete thoughts stay connected.'
                                 : `${selectedProfile?.displayName ?? 'Cloned'} voice identity with finalized-clause cadence; automatically falls back if its backlog exceeds 10 seconds.`}
                         </span>
                       </label>

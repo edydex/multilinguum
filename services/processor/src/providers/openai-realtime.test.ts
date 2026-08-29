@@ -173,7 +173,7 @@ describe('OpenAI Realtime provider adapters', () => {
       connectionFactory: () => connection,
       secretProvider: { create: async () => 'short-lived-test-secret' },
       stopDrainMs: 0,
-      commitIntervalMs: 4_000,
+      commitIntervalMs: 8_000,
     });
     const segments: TranscriptSegment[] = [];
     transcriber.onSegment((segment) => segments.push(segment));
@@ -181,7 +181,7 @@ describe('OpenAI Realtime provider adapters', () => {
     await transcriber.start(session());
     await transcriber.pushAudio(captureChunk(3_000));
     expect(connection.sent).toHaveLength(1);
-    await transcriber.pushAudio(captureChunk(4_000));
+    await transcriber.pushAudio(captureChunk(8_000));
     expect(connection.sent[2]).toEqual({ type: 'input_audio_buffer.commit' });
     connection.emit({
       type: 'conversation.item.input_audio_transcription.completed',
@@ -189,7 +189,7 @@ describe('OpenAI Realtime provider adapters', () => {
       transcript: 'Кротость — это внешняя реакция.',
     });
 
-    expect(segments[0]).toMatchObject({ sourceStartMs: 0, sourceEndMs: 4_000 });
+    expect(segments[0]).toMatchObject({ sourceStartMs: 0, sourceEndMs: 8_000 });
     await transcriber.stop();
     expect(connection.closed).toBe(true);
   });
