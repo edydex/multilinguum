@@ -4,11 +4,10 @@ import type {
   ChannelConfig,
   ChannelHealth,
   Language,
-  ProviderKind,
   ProcessorEvent,
   ServiceSession,
   TranscriptSegment,
-  VoiceMode,
+  VoiceProfile,
 } from '@multilinguum/protocol';
 import { api, subscribe, type OperatorConnection } from './api';
 import { useAudioMeter } from './useAudioMeter';
@@ -25,9 +24,31 @@ const allLanguages: Language[] = ['en', 'ru', 'es', 'uk'];
 
 interface TargetDraft {
   enabled: boolean;
-  voiceMode: VoiceMode;
-  provider: Extract<ProviderKind, 'openai-cascade' | 'openai-realtime'>;
+  outputMode: OutputMode;
   profileId: string;
+}
+
+type OutputMode = 'source' | 'generic-fast' | 'generic-expressive' | 'cloned';
+
+interface VoiceProfileDraft {
+  voiceName: string;
+  speakerName: string;
+  authorizerName: string;
+  confirmedDate: string;
+  referenceLanguage: 'en' | 'ru';
+  sample?: File;
+  consentConfirmed: boolean;
+}
+
+function newVoiceProfileDraft(): VoiceProfileDraft {
+  return {
+    voiceName: '',
+    speakerName: '',
+    authorizerName: '',
+    confirmedDate: new Date().toISOString().slice(0, 10),
+    referenceLanguage: 'en',
+    consentConfirmed: false,
+  };
 }
 
 function initialTargets(source: 'en' | 'ru'): Record<Language, TargetDraft> {
@@ -36,8 +57,7 @@ function initialTargets(source: 'en' | 'ru'): Record<Language, TargetDraft> {
       language,
       {
         enabled: true,
-        voiceMode: language === source ? 'source' : 'natural',
-        provider: 'openai-cascade',
+        outputMode: language === source ? 'source' : 'generic-expressive',
         profileId: '',
       },
     ]),
@@ -68,6 +88,9 @@ export function App() {
   const [health, setHealth] = useState<Record<string, ChannelHealth>>({});
   const [captions, setCaptions] = useState<Record<string, TranscriptSegment>>({});
   const [archives, setArchives] = useState<ArchiveManifest[]>([]);
+  const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([]);
+  const [addingVoice, setAddingVoice] = useState(false);
+  const [voiceDraft, setVoiceDraft] = useState<VoiceProfileDraft>(newVoiceProfileDraft);
   const [preflight, setPreflight] = useState<Record<string, unknown>>();
   const [source, setSource] = useState<'en' | 'ru'>('ru');
   const [targets, setTargets] = useState(() => initialTargets('ru'));
@@ -88,15 +111,17 @@ export function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [current, nextPreflight, nextArchives] = await Promise.all([
+      const [current, nextPreflight, nextArchives, nextVoiceProfiles] = await Promise.all([
         api.current(connection),
         api.preflight(connection),
         api.archives(connection),
+        api.voiceProfiles(connection),
       ]);
       setSession(current.session);
       setHealth(Object.fromEntries(current.health.map((item) => [item.channelId, item])));
       setPreflight(nextPreflight);
       setArchives(nextArchives);
+      setVoiceProfiles(nextVoiceProfiles);
       setError(undefined);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -180,9 +205,9 @@ export function App() {
       for (const language of allLanguages) {
         const previous = next[language]!;
         if (language === nextSource) {
-          next[language] = { ...previous, enabled: true, voiceMode: 'source' };
-        } else if (previous.voiceMode === 'source') {
-          next[language] = { ...previous, voiceMode: 'natural' };
+          next[language] = { ...previous, enabled: true, outputMode: 'source' };
+        } else if (previous.outputMode === 'source') {
+          next[language] = { ...previous, outputMode: 'generic-expressive' };
         }
       }
       return next;
@@ -203,11 +228,12 @@ export function App() {
             translationProvider:
               language === source
                 ? 'deterministic'
-                : draft.voiceMode === 'cloned'
-                  ? 'openai-cascade'
-                  : draft.provider,
-            voiceMode: language === source ? 'source' : draft.voiceMode,
-            ...(draft.voiceMode === 'cloned' && draft.profileId
+                : draft.outputMode === 'generic-fast'
+                  ? 'openai-realtime'
+                  : 'openai-cascade',
+            voiceMode:
+              language === source ? 'source' : draft.outputMode === 'cloned' ? 'cloned' : 'natural',
+            ...(draft.outputMode === 'cloned' && draft.profileId
               ? { voiceProfileId: draft.profileId }
               : {}),
             fallbackOrder: language === source ? ['mute'] : ['natural', 'mute'],
@@ -234,6 +260,55 @@ export function App() {
         budgetWarningUsd: 20,
       });
       setSession(await api.start(connection));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addVoiceProfile = async () => {
+    if (!voiceDraft.sample) {
+      setError('Choose a clean reference recording before adding the voice.');
+      return;
+    }
+    if (!voiceDraft.consentConfirmed) {
+      setError('Confirm the speaker authorization before adding the voice.');
+      return;
+    }
+    if (voiceDraft.sample.size > 25 * 1024 * 1024) {
+      setError('The reference recording must be 25 MB or smaller.');
+      return;
+    }
+    setBusy(true);
+    setError(undefined);
+    try {
+      const digest = await crypto.subtle.digest('SHA-256', await voiceDraft.sample.arrayBuffer());
+      const sampleSha256 = Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, '0'),
+      ).join('');
+      const created = await api.createVoiceProfile(connection, {
+        displayName: voiceDraft.voiceName.trim(),
+        referenceLanguage: voiceDraft.referenceLanguage,
+        sampleSha256,
+        supportedLanguages: ['en'],
+        consent: {
+          speakerName: voiceDraft.speakerName.trim(),
+          confirmedAt: new Date(`${voiceDraft.confirmedDate}T12:00:00Z`).toISOString(),
+          authorizerName: voiceDraft.authorizerName.trim(),
+          permittedUse: 'AI-generated English interpretation of this speaker at church services',
+          permittedLanguages: ['en'],
+          evidenceReference: `Operator-recorded confirmation on ${voiceDraft.confirmedDate}`,
+        },
+      });
+      const ready = await api.uploadVoiceSample(connection, created.id, voiceDraft.sample);
+      setVoiceProfiles((current) => [ready, ...current.filter((item) => item.id !== ready.id)]);
+      setTargets((current) => ({
+        ...current,
+        en: { ...current.en, outputMode: 'cloned', profileId: ready.id },
+      }));
+      setVoiceDraft(newVoiceProfileDraft());
+      setAddingVoice(false);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -419,6 +494,15 @@ export function App() {
                   const itemHealth = health[`channel-${language}`];
                   const caption = captions[`channel-${language}`];
                   const isSource = language === source;
+                  const availableProfiles = voiceProfiles.filter(
+                    (profile) =>
+                      profile.status === 'ready' &&
+                      !profile.consent.revokedAt &&
+                      profile.supportedLanguages.includes(language),
+                  );
+                  const selectedProfile = voiceProfiles.find(
+                    (profile) => profile.id === draft.profileId,
+                  );
                   return (
                     <article
                       className={`channel-card ${draft.enabled ? '' : 'disabled'}`}
@@ -446,76 +530,62 @@ export function App() {
                         <span className={`health-dot ${itemHealth?.state ?? 'idle'}`} />
                       </div>
                       <label>
-                        Voice
+                        Output voice
                         <select
-                          value={isSource ? 'source' : draft.voiceMode}
+                          value={
+                            isSource
+                              ? 'source'
+                              : draft.outputMode === 'cloned'
+                                ? `cloned:${draft.profileId}`
+                                : draft.outputMode
+                          }
                           disabled={live || isSource || !draft.enabled}
-                          onChange={(event) =>
+                          onChange={(event) => {
+                            if (event.target.value === 'add-cloned') {
+                              setAddingVoice(true);
+                              return;
+                            }
+                            const clonedProfileId = event.target.value.startsWith('cloned:')
+                              ? event.target.value.slice('cloned:'.length)
+                              : '';
                             setTargets((current) => ({
                               ...current,
                               [language]: {
                                 ...current[language]!,
-                                voiceMode: event.target.value as VoiceMode,
-                                ...(event.target.value === 'cloned'
-                                  ? { provider: 'openai-cascade' as const }
-                                  : {}),
+                                outputMode: clonedProfileId
+                                  ? 'cloned'
+                                  : (event.target.value as OutputMode),
+                                profileId: clonedProfileId,
                               },
-                            }))
-                          }
+                            }));
+                          }}
                         >
                           {isSource && <option value="source">Delayed original</option>}
-                          {!isSource && <option value="natural">Natural AI voice</option>}
+                          {!isSource && <option value="generic-fast">Generic · Fast</option>}
+                          {!isSource && (
+                            <option value="generic-expressive">Generic · Expressive</option>
+                          )}
                           {!isSource && source === 'ru' && language === 'en' && (
-                            <option value="cloned">Consented preacher voice</option>
+                            <>
+                              {availableProfiles.map((profile) => (
+                                <option key={profile.id} value={`cloned:${profile.id}`}>
+                                  {profile.displayName} Voice
+                                </option>
+                              ))}
+                              <option value="add-cloned">Add cloned voice…</option>
+                            </>
                           )}
                         </select>
+                        <span className="field-note">
+                          {isSource
+                            ? 'The original mixer audio is delayed to stay aligned with captions.'
+                            : draft.outputMode === 'generic-fast'
+                              ? 'Lowest delay. Speaks while the translation is arriving, with less reliable clause-level cadence.'
+                              : draft.outputMode === 'generic-expressive'
+                                ? 'Recommended. Waits for a glossary-checked clause, then uses warmer, more deliberate narration.'
+                                : `${selectedProfile?.displayName ?? 'Cloned'} voice identity with finalized-clause cadence; automatically falls back if its backlog exceeds 10 seconds.`}
+                        </span>
                       </label>
-                      {!isSource && (
-                        <label>
-                          Translation path
-                          <select
-                            value={draft.voiceMode === 'cloned' ? 'openai-cascade' : draft.provider}
-                            disabled={live || !draft.enabled || draft.voiceMode === 'cloned'}
-                            onChange={(event) =>
-                              setTargets((current) => ({
-                                ...current,
-                                [language]: {
-                                  ...current[language]!,
-                                  provider: event.target.value as TargetDraft['provider'],
-                                },
-                              }))
-                            }
-                          >
-                            <option value="openai-cascade">Accurate · glossary</option>
-                            <option value="openai-realtime">Fast · experimental</option>
-                          </select>
-                          <span className="field-note">
-                            {draft.voiceMode === 'cloned'
-                              ? 'Cloned voice requires finalized, glossary-checked clauses.'
-                              : draft.provider === 'openai-realtime'
-                                ? 'Lowest delay, but the RU→EN spike changed a meaning-sensitive phrase.'
-                                : 'Recommended for sermon accuracy; typically adds a short clause delay.'}
-                          </span>
-                        </label>
-                      )}
-                      {draft.voiceMode === 'cloned' && !isSource && (
-                        <label>
-                          Voice profile ID
-                          <input
-                            value={draft.profileId}
-                            disabled={live}
-                            onChange={(event) =>
-                              setTargets((current) => ({
-                                ...current,
-                                [language]: {
-                                  ...current[language]!,
-                                  profileId: event.target.value,
-                                },
-                              }))
-                            }
-                          />
-                        </label>
-                      )}
                       <p className="caption">{caption?.text ?? 'No caption yet'}</p>
                       <div className="metrics">
                         <span>{itemHealth?.listenerCount ?? 0} listeners</span>
@@ -548,7 +618,7 @@ export function App() {
                           >
                             {itemHealth.state === 'muted' ? 'Unmute' : 'Mute'}
                           </button>
-                          {draft.voiceMode === 'cloned' && (
+                          {draft.outputMode === 'cloned' && (
                             <button
                               onClick={() =>
                                 void api.channel(connection, itemHealth.channelId, {
@@ -572,6 +642,135 @@ export function App() {
                   );
                 })}
               </div>
+              {addingVoice && (
+                <div className="voice-creator">
+                  <div className="panel-title">
+                    <div>
+                      <p className="eyebrow">CONSENTED VOICE</p>
+                      <h2>Add cloned voice</h2>
+                    </div>
+                    <button type="button" onClick={() => setAddingVoice(false)}>
+                      Cancel
+                    </button>
+                  </div>
+                  <p className="voice-guidance">
+                    For English output, use a clean English recording around 10 seconds with only
+                    the speaker—no music, audience, or room echo. A Russian reference can carry a
+                    Russian accent into English.
+                  </p>
+                  <div className="voice-form-grid">
+                    <label>
+                      First name / voice label
+                      <input
+                        value={voiceDraft.voiceName}
+                        placeholder="Michael"
+                        onChange={(event) =>
+                          setVoiceDraft((current) => ({
+                            ...current,
+                            voiceName: event.target.value,
+                          }))
+                        }
+                      />
+                      <span className="field-note">
+                        Listeners and operators see “Michael Voice”.
+                      </span>
+                    </label>
+                    <label>
+                      Speaker's full name
+                      <input
+                        value={voiceDraft.speakerName}
+                        onChange={(event) =>
+                          setVoiceDraft((current) => ({
+                            ...current,
+                            speakerName: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Authorization confirmed by
+                      <input
+                        value={voiceDraft.authorizerName}
+                        onChange={(event) =>
+                          setVoiceDraft((current) => ({
+                            ...current,
+                            authorizerName: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Confirmation date
+                      <input
+                        type="date"
+                        value={voiceDraft.confirmedDate}
+                        onChange={(event) =>
+                          setVoiceDraft((current) => ({
+                            ...current,
+                            confirmedDate: event.target.value,
+                          }))
+                        }
+                      />
+                    </label>
+                    <label>
+                      Reference language
+                      <select
+                        value={voiceDraft.referenceLanguage}
+                        onChange={(event) =>
+                          setVoiceDraft((current) => ({
+                            ...current,
+                            referenceLanguage: event.target.value as 'en' | 'ru',
+                          }))
+                        }
+                      >
+                        <option value="en">English · recommended for English output</option>
+                        <option value="ru">Russian · accent transfer likely</option>
+                      </select>
+                    </label>
+                    <label>
+                      Clean reference recording
+                      <input
+                        type="file"
+                        accept="audio/*,.wav"
+                        onChange={(event) => {
+                          const sample = event.target.files?.[0];
+                          if (sample) setVoiceDraft((current) => ({ ...current, sample }));
+                        }}
+                      />
+                    </label>
+                  </div>
+                  <label className="consent-check">
+                    <input
+                      type="checkbox"
+                      checked={voiceDraft.consentConfirmed}
+                      onChange={(event) =>
+                        setVoiceDraft((current) => ({
+                          ...current,
+                          consentConfirmed: event.target.checked,
+                        }))
+                      }
+                    />
+                    <span>
+                      I have confirmed this speaker authorizes an AI-generated English rendering of
+                      their voice for church-service interpretation.
+                    </span>
+                  </label>
+                  <button
+                    className="secondary add-voice-button"
+                    disabled={
+                      busy ||
+                      !voiceDraft.voiceName.trim() ||
+                      !voiceDraft.speakerName.trim() ||
+                      !voiceDraft.authorizerName.trim() ||
+                      !voiceDraft.sample ||
+                      !voiceDraft.consentConfirmed
+                    }
+                    onClick={() => void addVoiceProfile()}
+                  >
+                    {busy ? 'Encrypting and installing…' : 'Add voice'}
+                  </button>
+                </div>
+              )}
             </section>
           </>
         )}

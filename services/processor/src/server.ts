@@ -71,6 +71,11 @@ function publicState(config: ProcessorConfig, engine: SessionEngine): PublicServ
 
 export async function buildServer(config: ProcessorConfig) {
   const app = Fastify({ logger: config.NODE_ENV !== 'test' });
+  app.addContentTypeParser(
+    'application/octet-stream',
+    { parseAs: 'buffer', bodyLimit: 25 * 1024 * 1024 },
+    (_request, body, done) => done(null, body),
+  );
   await app.register(cors, {
     origin: config.NODE_ENV === 'production' ? config.PROCESSOR_PUBLIC_URL : true,
   });
@@ -398,6 +403,24 @@ export async function buildServer(config: ProcessorConfig) {
   app.post('/api/voice-profiles', { preHandler: requireControl }, async (request, reply) =>
     reply.code(201).send(await profiles.create(request.body)),
   );
+  app.put(
+    '/api/voice-profiles/:profileId/sample',
+    { preHandler: requireControl },
+    async (request, reply) => {
+      if (!clonedSpeech) {
+        return reply.code(503).send({ error: 'The cloned-voice worker is not configured.' });
+      }
+      const { profileId } = request.params as { profileId: string };
+      const profile = await profiles.get(profileId);
+      if (!profile) return reply.code(404).send({ error: 'Voice profile not found.' });
+      const sample = request.body;
+      if (!Buffer.isBuffer(sample) || sample.byteLength === 0) {
+        return reply.code(400).send({ error: 'A non-empty reference audio file is required.' });
+      }
+      await clonedSpeech.installProfile(profile, sample);
+      return profiles.markReady(profile.id);
+    },
+  );
   app.post(
     '/api/voice-profiles/:profileId/ready',
     { preHandler: requireControl },
@@ -411,6 +434,7 @@ export async function buildServer(config: ProcessorConfig) {
     { preHandler: requireControl },
     async (request) => {
       const { profileId } = request.params as { profileId: string };
+      if (clonedSpeech) await clonedSpeech.revokeProfile(profileId);
       return profiles.revoke(profileId);
     },
   );

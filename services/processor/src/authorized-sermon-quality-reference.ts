@@ -154,7 +154,9 @@ for (const [sequence, sentence] of sentences.entries()) {
       sourceEndMs: Math.round((sourceDurationMs * (sequence + 1)) / sentences.length),
       sequence,
       exaggeration: 0.5,
-      cfgWeight: 0.35,
+      // The reference is Russian while the requested output is English. Chatterbox's
+      // documented cross-language mitigation is CFG 0 to reduce accent transfer.
+      cfgWeight: 0,
     }),
     signal: AbortSignal.timeout(120_000),
   });

@@ -313,6 +313,45 @@ select:focus {
 .channels-panel {
   margin-top: 18px;
 }
+.voice-creator {
+  margin-top: 18px;
+  padding: 20px;
+  border: 1px solid #ddcfeb;
+  border-radius: 16px;
+  background: #f8f3fc;
+}
+.voice-guidance {
+  max-width: 850px;
+  color: #665a70;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.voice-form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+.consent-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 900px;
+  margin-top: 18px;
+  color: #54485f;
+  font-size: 12px;
+  line-height: 1.45;
+}
+.consent-check input {
+  width: 17px;
+  margin-top: 1px;
+}
+.add-voice-button {
+  margin-top: 16px;
+}
+.add-voice-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
 .channel-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -512,5 +551,8 @@ pre {
 @media (max-width: 1180px) {
   .channel-grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+  .voice-form-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

@@ -62,6 +62,8 @@ export interface ConsentRecord {
 export interface VoiceProfile {
   id: string;
   displayName: string;
+  /** Language spoken in the reference recording used to condition the clone. */
+  referenceLanguage?: Language;
   encryptedSampleLocation: string;
   sampleSha256: string;
   supportedLanguages: Language[];

@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 const createProfileSchema = z.object({
   displayName: z.string().min(1).max(100),
-  encryptedSampleLocation: z.string().min(1),
+  referenceLanguage: z.enum(['en', 'ru', 'es', 'uk']),
   sampleSha256: z.string().regex(/^[a-f0-9]{64}$/),
   supportedLanguages: z.array(z.enum(['en', 'ru', 'es', 'uk'])).min(1),
   consent: z.object({
@@ -45,7 +45,8 @@ export class VoiceProfileStore {
     const profile: VoiceProfile = {
       id,
       displayName: parsed.displayName,
-      encryptedSampleLocation: parsed.encryptedSampleLocation,
+      referenceLanguage: parsed.referenceLanguage,
+      encryptedSampleLocation: `voice-worker://profiles/${id}`,
       sampleSha256: parsed.sampleSha256,
       supportedLanguages: parsed.supportedLanguages as Language[],
       consent,

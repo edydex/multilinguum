@@ -3,6 +3,7 @@ import type {
   ChannelHealth,
   ProcessorEvent,
   ServiceSession,
+  VoiceProfile,
 } from '@multilinguum/protocol';
 
 export interface OperatorConnection {
@@ -40,6 +41,29 @@ async function requestBlob(connection: OperatorConnection, path: string): Promis
     throw new Error(body.error ?? `${response.status} ${response.statusText}`);
   }
   return response.blob();
+}
+
+async function uploadVoiceSample(
+  connection: OperatorConnection,
+  profileId: string,
+  sample: File,
+): Promise<VoiceProfile> {
+  const response = await fetch(
+    new URL(`/api/voice-profiles/${encodeURIComponent(profileId)}/sample`, connection.baseUrl),
+    {
+      method: 'PUT',
+      headers: {
+        authorization: `Bearer ${connection.token}`,
+        'content-type': 'application/octet-stream',
+      },
+      body: sample,
+    },
+  );
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `${response.status} ${response.statusText}`);
+  }
+  return (await response.json()) as VoiceProfile;
 }
 
 export const api = {
@@ -86,6 +110,19 @@ export const api = {
     }),
   deleteArchive: (connection: OperatorConnection, sessionId: string) =>
     request<void>(connection, `/api/archives/${sessionId}`, { method: 'DELETE' }),
+  voiceProfiles: (connection: OperatorConnection) =>
+    request<VoiceProfile[]>(connection, '/api/voice-profiles'),
+  createVoiceProfile: (connection: OperatorConnection, body: unknown) =>
+    request<VoiceProfile>(connection, '/api/voice-profiles', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  uploadVoiceSample,
+  revokeVoiceProfile: (connection: OperatorConnection, profileId: string) =>
+    request<VoiceProfile>(connection, `/api/voice-profiles/${profileId}/revoke`, {
+      method: 'POST',
+      body: '{}',
+    }),
 };
 
 export function subscribe(
