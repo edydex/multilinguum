@@ -46,6 +46,7 @@ export class RealtimeCapturePipeline {
   #latestCapturedAtUnixMs = 0;
   #inputChain = Promise.resolve();
   #sourceTranscriptChain = Promise.resolve();
+  #cascadeTranscriptChain = Promise.resolve();
   #translatedTranscriptChain = Promise.resolve();
   #started = false;
 
@@ -149,6 +150,7 @@ export class RealtimeCapturePipeline {
     await this.#transcriber.stop();
     await Promise.all([
       this.#sourceTranscriptChain,
+      this.#cascadeTranscriptChain,
       this.#translatedTranscriptChain,
       ...this.#audioChains.values(),
     ]);
@@ -199,32 +201,32 @@ export class RealtimeCapturePipeline {
   #receiveSourceTranscript(segment: TranscriptSegment): void {
     const completedAtUnixMs = Date.parse(segment.emittedAt);
     const captureCompletedAtUnixMs = this.#captureTimestamp(segment.sourceEndMs);
+    const timing = {
+      ...(captureCompletedAtUnixMs !== undefined
+        ? {
+            captureCompletedAtUnixMs,
+            chunkReadyAtUnixMs: captureCompletedAtUnixMs,
+          }
+        : {}),
+      transcriptionEngine: this.#transcriber.name,
+      transcription: {
+        startedAtUnixMs:
+          captureCompletedAtUnixMs ??
+          Date.parse(this.#session.startedAt ?? this.#session.createdAt) + segment.sourceEndMs,
+        ...(segment.firstDeltaAtUnixMs !== undefined
+          ? { firstDeltaAtUnixMs: segment.firstDeltaAtUnixMs }
+          : {}),
+        completedAtUnixMs: Number.isFinite(completedAtUnixMs) ? completedAtUnixMs : Date.now(),
+      },
+    };
+    const sourceChannelIds = new Set([this.#sourceChannelId()]);
     this.#sourceTranscriptChain = this.#sourceTranscriptChain
       .then(async () => {
         await this.#engine.ingestLiveTranscript(
           segment,
-          {
-            ...(captureCompletedAtUnixMs !== undefined
-              ? {
-                  captureCompletedAtUnixMs,
-                  chunkReadyAtUnixMs: captureCompletedAtUnixMs,
-                }
-              : {}),
-            transcriptionEngine: this.#transcriber.name,
-            transcription: {
-              startedAtUnixMs:
-                captureCompletedAtUnixMs ??
-                Date.parse(this.#session.startedAt ?? this.#session.createdAt) +
-                  segment.sourceEndMs,
-              ...(segment.firstDeltaAtUnixMs !== undefined
-                ? { firstDeltaAtUnixMs: segment.firstDeltaAtUnixMs }
-                : {}),
-              completedAtUnixMs: Number.isFinite(completedAtUnixMs)
-                ? completedAtUnixMs
-                : Date.now(),
-            },
-          },
+          timing,
           this.#activeDirectChannelIds,
+          sourceChannelIds,
         );
       })
       .catch((error) => {
@@ -232,6 +234,32 @@ export class RealtimeCapturePipeline {
           this.#sourceChannelId(),
           error instanceof Error ? error : new Error(String(error)),
         );
+      });
+    const cascadeChannelIds = new Set(
+      this.#session.targets
+        .filter(
+          (channel) =>
+            channel.voiceMode !== 'source' && !this.#activeDirectChannelIds.has(channel.id),
+        )
+        .map((channel) => channel.id),
+    );
+    if (cascadeChannelIds.size === 0) return;
+    this.#cascadeTranscriptChain = this.#cascadeTranscriptChain
+      .then(async () => {
+        await this.#engine.ingestLiveTranscript(
+          segment,
+          timing,
+          this.#activeDirectChannelIds,
+          cascadeChannelIds,
+        );
+      })
+      .catch((error) => {
+        for (const channelId of cascadeChannelIds) {
+          this.#engine.reportChannelFailure(
+            channelId,
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
       });
   }
 

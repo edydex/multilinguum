@@ -132,7 +132,7 @@ describe('OpenAI Realtime provider adapters', () => {
     transcriber.onSegment((segment) => segments.push(segment));
 
     await transcriber.start(session());
-    await transcriber.pushAudio(captureChunk(2_000));
+    await transcriber.pushAudio(captureChunk(3_000));
     connection.emit({
       type: 'conversation.item.input_audio_transcription.delta',
       item_id: 'item-1',
@@ -151,7 +151,7 @@ describe('OpenAI Realtime provider adapters', () => {
       language: 'ru',
       text: 'Благодать вам и мир.',
       sourceStartMs: 0,
-      sourceEndMs: 2_000,
+      sourceEndMs: 3_000,
       firstDeltaAtUnixMs: expect.any(Number),
       final: true,
       sequence: 0,

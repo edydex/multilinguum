@@ -218,6 +218,7 @@ export class SessionEngine {
     source: TranscriptSegment,
     timing?: SourceProcessingTiming,
     directChannelIds: ReadonlySet<string> = new Set(),
+    onlyChannelIds?: ReadonlySet<string>,
   ): Promise<TranscriptSegment[]> {
     const session = this.#requiredSession();
     if (session.state !== 'live') throw new Error('Session is not live.');
@@ -231,6 +232,7 @@ export class SessionEngine {
       normalized,
       timing,
       (runtime) => {
+        if (onlyChannelIds && !onlyChannelIds.has(runtime.config.id)) return false;
         if (runtime.config.voiceMode === 'source') return true;
         if (runtime.config.voiceMode === 'cloned') return true;
         return !directChannelIds.has(runtime.config.id);

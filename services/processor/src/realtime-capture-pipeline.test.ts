@@ -210,6 +210,7 @@ describe('RealtimeCapturePipeline', () => {
         transcription: expect.objectContaining({ startedAtUnixMs: 6_600 }),
       }),
       expect.any(Set),
+      expect.any(Set),
     ]);
     expect(translatedTranscripts).toEqual([
       [
