@@ -166,7 +166,7 @@ export class RealtimeCapturePipeline {
     await Promise.allSettled([...this.#channels.values()].map((channel) => channel.stop()));
     await this.#transcriber.stop();
     for (const channelId of this.#transcriptBuffers.keys()) this.#flushTranscript(channelId);
-    this.#flushCascadeTranscript();
+    this.#flushCompletedCascadeAtStop();
     await Promise.all([
       this.#sourceTranscriptChain,
       this.#cascadeTranscriptChain,
@@ -366,6 +366,17 @@ export class RealtimeCapturePipeline {
           );
         }
       });
+  }
+
+  #flushCompletedCascadeAtStop(): void {
+    const buffered = this.#cascadeBuffer;
+    if (!buffered) return;
+    const boundary = lastSentenceBoundary(buffered.segment.text);
+    if (boundary > 0) this.#flushCascadeSentence(boundary);
+    // A short unpunctuated tail is intentionally not translated at Stop. It is
+    // usually a sentence cut off by the operator, and context notes must never
+    // be allowed to supply words that were not captured.
+    this.#cascadeBuffer = undefined;
   }
 
   #captureTimestamp(sourceEndMs: number): number | undefined {

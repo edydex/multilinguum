@@ -293,7 +293,7 @@ describe('RealtimeCapturePipeline', () => {
     expect(calls.filter((call) => (call[3] as Set<string>).has('channel-ru'))).toHaveLength(2);
   });
 
-  it('publishes a complete sentence while retaining the next sentence fragment', async () => {
+  it('publishes a complete sentence but drops an unfinished fragment at Stop', async () => {
     const calls: unknown[][] = [];
     const engine = {
       ingestSourceAudio: async () => undefined,
@@ -328,6 +328,6 @@ describe('RealtimeCapturePipeline', () => {
     const cascadeTexts = calls
       .filter((call) => (call[3] as Set<string>).has('channel-en'))
       .map((call) => (call[0] as TranscriptSegment).text);
-    expect(cascadeTexts).toEqual(['Кротость — это внешняя реакция.', 'Можно сказать']);
+    expect(cascadeTexts).toEqual(['Кротость — это внешняя реакция.']);
   });
 });
