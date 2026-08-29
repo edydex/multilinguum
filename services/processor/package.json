@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "benchmark:cloud": "node dist/cloud-benchmark.js",
     "benchmark:complimentary": "node dist/complimentary-benchmark.js",
+    "rehearse:authorized-sermon": "node dist/authorized-sermon-rehearsal.js",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest run",

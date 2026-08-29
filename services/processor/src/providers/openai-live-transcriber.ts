@@ -217,6 +217,9 @@ export class OpenAILiveTranscriber implements Transcriber {
       sourceStartMs,
       sourceEndMs,
       emittedAt: new Date().toISOString(),
+      ...(timing.firstDeltaAtUnixMs !== undefined
+        ? { firstDeltaAtUnixMs: timing.firstDeltaAtUnixMs }
+        : {}),
       final: true,
       sequence: this.#sequence++,
     };

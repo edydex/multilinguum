@@ -198,6 +198,9 @@ export class RealtimeCapturePipeline {
               startedAtUnixMs:
                 Date.parse(this.#session.startedAt ?? this.#session.createdAt) +
                 segment.sourceStartMs,
+              ...(segment.firstDeltaAtUnixMs !== undefined
+                ? { firstDeltaAtUnixMs: segment.firstDeltaAtUnixMs }
+                : {}),
               completedAtUnixMs: Number.isFinite(completedAtUnixMs)
                 ? completedAtUnixMs
                 : Date.now(),

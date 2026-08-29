@@ -162,6 +162,7 @@ describe('OpenAI Realtime provider adapters', () => {
       text: 'Благодать вам и мир.',
       sourceStartMs: 200,
       sourceEndMs: 1_600,
+      firstDeltaAtUnixMs: expect.any(Number),
       final: true,
       sequence: 0,
     });

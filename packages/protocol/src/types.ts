@@ -158,6 +158,7 @@ export interface TranscriptSegment {
   sourceStartMs: number;
   sourceEndMs: number;
   emittedAt: string;
+  firstDeltaAtUnixMs?: number;
   final: boolean;
   sequence: number;
 }
