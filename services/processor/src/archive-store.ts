@@ -133,32 +133,37 @@ export class FileArchiveStore implements ArchiveStore {
       manifest.audioTracks.map(async (track) => {
         const pcmPath = path.join(this.#sessionRoot(sessionId), 'audio', `${track.channelId}.pcm`);
         const opusPath = path.join(this.#sessionRoot(sessionId), track.path);
+        let information: Awaited<ReturnType<typeof stat>>;
         try {
-          const information = await stat(pcmPath);
-          if (information.size === 0) return;
-          await execFileAsync('ffmpeg', [
-            '-hide_banner',
-            '-loglevel',
-            'error',
-            '-y',
-            '-f',
-            's16le',
-            '-ar',
-            '48000',
-            '-ac',
-            '1',
-            '-i',
-            pcmPath,
-            '-c:a',
-            'libopus',
-            '-b:a',
-            '48k',
-            opusPath,
-          ]);
-          await unlink(pcmPath);
+          information = await stat(pcmPath);
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+          return;
         }
+        if (information.size === 0) {
+          await unlink(pcmPath);
+          return;
+        }
+        await execFileAsync('ffmpeg', [
+          '-hide_banner',
+          '-loglevel',
+          'error',
+          '-y',
+          '-f',
+          's16le',
+          '-ar',
+          '48000',
+          '-ac',
+          '1',
+          '-i',
+          pcmPath,
+          '-c:a',
+          'libopus',
+          '-b:a',
+          '48k',
+          opusPath,
+        ]);
+        await unlink(pcmPath);
       }),
     );
     const audioTracks = await Promise.all(

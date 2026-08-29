@@ -1,1 +1,14 @@
-chatterbox-tts
+# Chatterbox 0.1.7 pins torch 2.6 for Python 3.11. The worker image deliberately
+# retains the Blackwell-capable torch 2.7.1/CUDA 12.8 runtime and installs the
+# Chatterbox source archive itself with --no-deps in the Dockerfile.
+conformer==0.3.2
+diffusers==0.29.0
+librosa==0.11.0
+omegaconf==2.3.0
+pykakasi==2.3.0
+pyloudnorm==0.1.1
+resemble-perth==1.0.1
+s3tokenizer==0.3.0
+safetensors==0.5.3
+spacy-pkuseg==1.0.1
+transformers==5.2.0
