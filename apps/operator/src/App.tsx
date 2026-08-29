@@ -102,9 +102,33 @@ function formatLatency(milliseconds: number): string {
 
 function archiveP95Latency(archive: ArchiveManifest): number | undefined {
   const values = Object.values(archive.latencyReport.channels)
-    .map((summary) => summary.p95.sourceEndToAudioMs ?? summary.p95.sourceEndToCaptionMs)
+    .map(
+      (summary) =>
+        summary.p95.sourceEndToPlayoutMs ??
+        summary.p95.sourceEndToAudioMs ??
+        summary.p95.sourceEndToCaptionMs,
+    )
     .filter((value): value is number => value !== undefined);
   return values.length > 0 ? Math.max(...values) : undefined;
+}
+
+interface CaptionPair {
+  final?: TranscriptSegment;
+  live?: TranscriptSegment;
+}
+
+function mergeCaption(current: CaptionPair | undefined, segment: TranscriptSegment): CaptionPair {
+  const existing = current ?? {};
+  if (!segment.final) {
+    if ((existing.final?.sequence ?? -1) > segment.sequence) return existing;
+    if ((existing.live?.sequence ?? -1) > segment.sequence) return existing;
+    return { ...existing, live: segment };
+  }
+  if ((existing.final?.sequence ?? -1) > segment.sequence) return existing;
+  return {
+    final: segment,
+    ...(existing.live && existing.live.sequence > segment.sequence ? { live: existing.live } : {}),
+  };
 }
 
 export function App() {
@@ -118,7 +142,7 @@ export function App() {
   const [connected, setConnected] = useState(false);
   const [session, setSession] = useState<ServiceSession>();
   const [health, setHealth] = useState<Record<string, ChannelHealth>>({});
-  const [captions, setCaptions] = useState<Record<string, TranscriptSegment>>({});
+  const [captions, setCaptions] = useState<Record<string, CaptionPair>>({});
   const [archives, setArchives] = useState<ArchiveManifest[]>([]);
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([]);
   const [contextDocuments, setContextDocuments] = useState<ContextDocument[]>([]);
@@ -239,7 +263,13 @@ export function App() {
           setHealth((current) => ({ ...current, [event.health.channelId]: event.health }));
         }
         if (event.type === 'transcript') {
-          setCaptions((current) => ({ ...current, [event.segment.channelId]: event.segment }));
+          setCaptions((current) => ({
+            ...current,
+            [event.segment.channelId]: mergeCaption(
+              current[event.segment.channelId],
+              event.segment,
+            ),
+          }));
         }
         if (event.type === 'error') setError(`${event.scope}: ${event.message}`);
       },
@@ -785,14 +815,25 @@ export function App() {
                             : draft.outputMode === 'generic-fast'
                               ? 'Lowest delay. Speaks while the translation is arriving, with less reliable clause-level cadence.'
                               : draft.outputMode === 'generic-expressive'
-                                ? 'Recommended. Transcribes up to eight seconds of speech, then narrates only at sentence punctuation so words and complete thoughts stay connected.'
+                                ? 'Recommended. Builds complete thoughts and pre-renders the next clause for continuous, natural cadence. It only accelerates gently when the real playback queue exceeds 20 seconds.'
                                 : `${selectedProfile?.displayName ?? 'Cloned'} voice identity with finalized-clause cadence; automatically falls back if its backlog exceeds 10 seconds.`}
                         </span>
                       </label>
-                      <p className="caption">{caption?.text ?? 'No caption yet'}</p>
+                      <p className="caption">
+                        {caption?.final ? (
+                          <span className="caption-final">{caption.final.text}</span>
+                        ) : !caption?.live ? (
+                          'No caption yet'
+                        ) : null}
+                        {caption?.live &&
+                          (!caption.final || caption.live.sequence > caption.final.sequence) && (
+                            <span className="caption-live">{caption.live.text}</span>
+                          )}
+                      </p>
                       <div className="metrics">
                         <span>{itemHealth?.listenerCount ?? 0} listeners</span>
                         <span>E2E {formatLatency(itemHealth?.latencyMs ?? 0)}</span>
+                        <span>Queue {formatLatency(itemHealth?.backlogMs ?? 0)}</span>
                         {sttP95 !== undefined && <span>STT p95 {formatLatency(sttP95)}</span>}
                         {itemHealth?.latency?.p95.translationMs !== undefined && (
                           <span>

@@ -13,8 +13,12 @@ Multilinguum records a timing sample for every finalized source segment and lang
 - `translationMs`: finalized source transcript to finalized translated text. This is the isolated ChatGPT translation contribution in the fallback cascade.
 - `speechRenderMs`: translated text to completed natural or cloned PCM.
 - `captionPublishMs` and `audioPublishMs`: time spent handing output to the configured relay.
+- `playoutQueueMs`: actual LiveKit audio already queued when this rendered clause was submitted.
 - `sourceEndToTranscriptMs`, `sourceEndToCaptionMs`, and `sourceEndToAudioMs`: end-to-end processor measurements from the latest captured source audio.
 - `sourceStartToAudioMs`: worst position in the segment, including the chunk window.
+- `sourceEndToPlayoutMs` and `sourceStartToPlayoutMs`: queue-aware estimates for when the first
+  sample of the clause reaches relay playout. These replace relay acceptance as the operator's
+  best server-side end-to-end estimate.
 
 The final venue test also needs a listener-side probe because relay submission is not the same as sound reaching a phone. Capture and processor clocks must be synchronized; a negative capture-derived value is retained as evidence of clock skew rather than silently clamped in the archive.
 
@@ -40,4 +44,4 @@ The translation protocol's per-event `elapsed_ms` is alignment metadata, not a u
 
 The first measured paid result and its limitations are recorded in [the 2026-08-29 OpenAI RU to EN report](benchmarks/2026-08-29-openai-ru-en.md).
 
-The live capture route now feeds 48 kHz frames to a shared live transcriber and the active direct translation channels without waiting for a five-second file chunk. Source archive/original-audio publication remains five-second chunked. Realtime transcript clauses are finalized on punctuation, 240 characters, three seconds of aligned source time, or session close; each finalized caption creates an archive latency sample. Returned audio updates channel health continuously, but its latency is provisional until silence trimming and listener playout instrumentation are complete.
+The live capture route now feeds 48 kHz frames to a shared live transcriber and the active direct translation channels without waiting for a five-second file chunk. Source archive/original-audio publication remains five-second chunked. Realtime transcript clauses are finalized on punctuation, 240 characters, three seconds of aligned source time, or session close; each finalized caption creates an archive latency sample. Expressive audio is rendered ahead, edge-trimmed, and queued in source order. Server-side latency now includes actual LiveKit queue depth, but remains provisional until a listener-side acoustic probe measures sound reaching a phone.

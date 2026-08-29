@@ -30,6 +30,11 @@ export interface TranslationContext {
   sermonNotes?: string[];
 }
 
+export interface SpeechRenderContext {
+  /** Audio already queued or being rendered ahead of this clause. */
+  playbackBacklogMs: number;
+}
+
 export interface Transcriber {
   readonly name: string;
   start(session: ServiceSession): Promise<void>;
@@ -65,7 +70,11 @@ export interface TranslationProvider {
 
 export interface SpeechRenderer {
   readonly name: string;
-  render(segment: TranscriptSegment, profile?: VoiceProfile): Promise<RenderedSpeech>;
+  render(
+    segment: TranscriptSegment,
+    profile?: VoiceProfile,
+    context?: SpeechRenderContext,
+  ): Promise<RenderedSpeech>;
   health(): Promise<{ ready: boolean; detail?: string }>;
 }
 
@@ -80,6 +89,7 @@ export interface MediaRelay {
   onListenerCount(listener: (language: Language, count: number) => void): () => void;
   createSession(session: ServiceSession): Promise<void>;
   publishChannel(config: ChannelConfig): Promise<PublishedChannel>;
+  audioBacklogMs(channelId: string): number;
   publishAudio(channelId: string, chunk: RenderedSpeech): Promise<void>;
   publishCaption(segment: TranscriptSegment): Promise<void>;
   closeSession(sessionId: string): Promise<void>;

@@ -396,6 +396,7 @@ export async function buildServer(config: ProcessorConfig) {
     for (const segment of replay.segments) {
       translated.push(...(await engine.ingestTranscript(segment)));
     }
+    await engine.drainAudio();
     return { translated };
   });
   app.post(

@@ -43,6 +43,10 @@ export class BroadcastMediaRelay implements MediaRelay {
     // Audio publication is handled by the configured LiveKit publisher in production.
   }
 
+  audioBacklogMs(_channelId: string): number {
+    return 0;
+  }
+
   async publishCaption(segment: TranscriptSegment): Promise<void> {
     this.#broadcast({ type: 'transcript', segment });
   }

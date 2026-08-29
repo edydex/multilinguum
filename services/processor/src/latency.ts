@@ -15,10 +15,13 @@ const metricNames = [
   'speechRenderMs',
   'captionPublishMs',
   'audioPublishMs',
+  'playoutQueueMs',
   'sourceEndToTranscriptMs',
   'sourceEndToCaptionMs',
   'sourceEndToAudioMs',
   'sourceStartToAudioMs',
+  'sourceEndToPlayoutMs',
+  'sourceStartToPlayoutMs',
 ] as const satisfies ReadonlyArray<keyof PipelineLatencyBreakdown>;
 
 function elapsed(startedAtUnixMs: number, completedAtUnixMs: number): number {
@@ -55,6 +58,12 @@ export function buildLatencyBreakdown(
         sample.audioPublish.startedAtUnixMs - sample.captureCompletedAtUnixMs,
       );
       metrics.sourceStartToAudioMs = metrics.sourceEndToAudioMs + metrics.chunkWindowMs;
+    }
+    if (sample.playout) {
+      metrics.sourceEndToPlayoutMs = Math.round(
+        sample.playout.startedAtUnixMs - sample.captureCompletedAtUnixMs,
+      );
+      metrics.sourceStartToPlayoutMs = metrics.sourceEndToPlayoutMs + metrics.chunkWindowMs;
     }
   }
   if (sample.transcription) {
@@ -97,6 +106,12 @@ export function buildLatencyBreakdown(
     metrics.audioPublishMs = elapsed(
       sample.audioPublish.startedAtUnixMs,
       sample.audioPublish.completedAtUnixMs,
+    );
+  }
+  if (sample.playout && sample.audioPublish) {
+    metrics.playoutQueueMs = Math.max(
+      0,
+      Math.round(sample.playout.startedAtUnixMs - sample.audioPublish.startedAtUnixMs),
     );
   }
   return metrics;

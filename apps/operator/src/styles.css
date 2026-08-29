@@ -484,6 +484,15 @@ select:focus {
   -webkit-box-orient: vertical;
   overflow: hidden;
 }
+.caption-final {
+  color: #28222d;
+}
+.caption-live {
+  color: #9a939d;
+}
+.caption-final + .caption-live::before {
+  content: ' ';
+}
 .metrics {
   display: flex;
   flex-wrap: wrap;

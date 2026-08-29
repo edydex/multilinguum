@@ -22,6 +22,25 @@ interface TokenResponse {
   expiresInSeconds: number;
 }
 
+interface CaptionPair {
+  final?: TranscriptSegment;
+  live?: TranscriptSegment;
+}
+
+function mergeCaption(current: CaptionPair | undefined, segment: TranscriptSegment): CaptionPair {
+  const existing = current ?? {};
+  if (!segment.final) {
+    if ((existing.final?.sequence ?? -1) > segment.sequence) return existing;
+    if ((existing.live?.sequence ?? -1) > segment.sequence) return existing;
+    return { ...existing, live: segment };
+  }
+  if ((existing.final?.sequence ?? -1) > segment.sequence) return existing;
+  return {
+    final: segment,
+    ...(existing.live && existing.live.sequence > segment.sequence ? { live: existing.live } : {}),
+  };
+}
+
 export function App() {
   const [service, setService] = useState<PublicServiceState>({
     active: false,
@@ -29,7 +48,7 @@ export function App() {
     languages: [],
   });
   const [language, setLanguage] = useState<Language>();
-  const [captions, setCaptions] = useState<Record<string, TranscriptSegment>>({});
+  const [captions, setCaptions] = useState<Record<string, CaptionPair>>({});
   const [connected, setConnected] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [captionsVisible, setCaptionsVisible] = useState(true);
@@ -72,7 +91,10 @@ export function App() {
         } else if (event.type === 'session') {
           void load();
         } else if (event.type === 'transcript') {
-          setCaptions((current) => ({ ...current, [event.segment.language]: event.segment }));
+          setCaptions((current) => ({
+            ...current,
+            [event.segment.language]: mergeCaption(current[event.segment.language], event.segment),
+          }));
         }
       };
       socket.onerror = () => socket?.close();
@@ -190,7 +212,7 @@ export function App() {
         <div className="church-mark">✦</div>
         <p>{service.churchName}</p>
         <h1>Live translation</h1>
-        <span className="delay">Approximately 5–15 seconds behind, depending on voice mode</span>
+        <span className="delay">Approximately 5–20 seconds behind, depending on voice mode</span>
       </header>
 
       {!service.active ? (
@@ -250,7 +272,19 @@ export function App() {
               </button>
             </div>
             {captionsVisible && (
-              <p>{caption?.text ?? 'Captions will appear when the speaker begins.'}</p>
+              <p className="caption-copy">
+                {caption?.final ? (
+                  <span className="caption-final">{caption.final.text}</span>
+                ) : !caption?.live ? (
+                  <span className="caption-placeholder">
+                    Captions will appear when the speaker begins.
+                  </span>
+                ) : null}
+                {caption?.live &&
+                  (!caption.final || caption.live.sequence > caption.final.sequence) && (
+                    <span className="caption-live">{caption.live.text}</span>
+                  )}
+              </p>
             )}
           </section>
 

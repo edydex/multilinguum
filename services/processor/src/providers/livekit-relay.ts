@@ -102,10 +102,10 @@ export class LiveKitMediaRelay implements MediaRelay {
     if (existing) {
       return { channelId: config.id, roomName: session.relayRoom, trackName: existing.trackName };
     }
-    // Keep capture non-blocking for normal clause and 5-second source chunks.
-    // LiveKit still plays the queued PCM at real-time speed; the larger queue
-    // prevents relay backpressure from stalling transcription and captions.
-    const source = new AudioSource(48000, 1, 10_000);
+    // Give the look-ahead renderer room to queue several clauses. The source
+    // still plays at real-time speed; this prevents API/render jitter from
+    // becoming an audible pause between every sentence.
+    const source = new AudioSource(48000, 1, 45_000);
     const trackName =
       config.voiceMode === 'source'
         ? `source-${config.targetLanguage}`
@@ -135,6 +135,10 @@ export class LiveKitMediaRelay implements MediaRelay {
       if (frameData.length === 0) continue;
       await published.source.captureFrame(new AudioFrame(frameData, 48000, 1, frameData.length));
     }
+  }
+
+  audioBacklogMs(channelId: string): number {
+    return Math.max(0, Math.round(this.#channels.get(channelId)?.source.queuedDuration ?? 0));
   }
 
   async publishCaption(segment: TranscriptSegment): Promise<void> {

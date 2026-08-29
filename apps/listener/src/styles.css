@@ -211,11 +211,32 @@ h1 {
   background: transparent;
   cursor: pointer;
 }
-.captions p {
+.caption-copy {
   margin: 16px 0 0;
   font-family: Georgia, serif;
   font-size: 21px;
   line-height: 1.48;
+}
+.caption-final {
+  color: #1f1c22;
+}
+.caption-live {
+  color: #9a969e;
+}
+.caption-final + .caption-live::before {
+  content: ' ';
+}
+.caption-live::after {
+  content: '  LIVE';
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  vertical-align: 0.2em;
+  color: #aaa5ad;
+}
+.caption-placeholder {
+  color: #7d817d;
 }
 .disclosure {
   color: #81847f;
@@ -270,7 +291,7 @@ footer {
   .language-picker button span {
     display: none;
   }
-  .captions p {
+  .caption-copy {
     font-size: 19px;
   }
 }

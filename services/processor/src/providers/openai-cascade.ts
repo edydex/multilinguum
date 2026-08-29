@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import type {
   RenderedSpeech,
+  SpeechRenderContext,
   SpeechRenderer,
   TranscriptSegment,
   TranslationContext,
@@ -76,24 +77,24 @@ export class OpenAINaturalSpeechRenderer implements SpeechRenderer {
     this.name = `openai-tts:${model}`;
   }
 
-  async render(segment: TranscriptSegment, _profile?: VoiceProfile): Promise<RenderedSpeech> {
-    const sourceWindowSeconds = Math.max(
-      0.75,
-      (segment.sourceEndMs - segment.sourceStartMs) / 1_000,
-    );
-    const wordCount = segment.text.trim().split(/\s+/u).filter(Boolean).length;
-    const estimatedNaturalSeconds = Math.max(0.75, wordCount / 2.5);
-    const speed = Math.min(1.5, Math.max(1, estimatedNaturalSeconds / sourceWindowSeconds));
+  async render(
+    segment: TranscriptSegment,
+    _profile?: VoiceProfile,
+    context?: SpeechRenderContext,
+  ): Promise<RenderedSpeech> {
+    const backlogMs = context?.playbackBacklogMs ?? 0;
+    const speed = naturalSpeechSpeed(backlogMs);
     const response = await this.#client.audio.speech.create({
       model: this.#model,
       voice: 'cedar',
       input: segment.text,
       response_format: 'pcm',
-      speed: Number(speed.toFixed(2)),
+      speed,
       instructions:
-        `Warm, clear church interpretation. Speak the complete thought as one connected sentence, ` +
-        `follow its punctuation and emphasis without dramatizing, and aim for about ` +
-        `${sourceWindowSeconds.toFixed(1)} seconds.`,
+        'Warm, clear church interpretation at a calm, natural speaking pace. Speak the complete ' +
+        'thought fluidly, honor its punctuation and emphasis without dramatizing, and do not rush ' +
+        'to match the source speaker. Begin promptly and avoid a long silent tail; adjacent clauses ' +
+        'will be joined into one continuous program.',
     });
     const pcm24k = new Int16Array(await response.arrayBuffer());
     const pcm48k = new Int16Array(pcm24k.length * 2);
@@ -121,4 +122,15 @@ export class OpenAINaturalSpeechRenderer implements SpeechRenderer {
       detail: 'Credentials are configured; a live request is required to verify access.',
     };
   }
+}
+
+/**
+ * Normal speech is deliberately a touch relaxed. Catch-up begins only after a
+ * sustained 20-second queue and remains subtle enough to avoid a rushed voice.
+ */
+export function naturalSpeechSpeed(playbackBacklogMs: number): number {
+  if (playbackBacklogMs < 20_000) return 0.98;
+  if (playbackBacklogMs < 30_000) return 1.03;
+  if (playbackBacklogMs < 45_000) return 1.07;
+  return 1.12;
 }

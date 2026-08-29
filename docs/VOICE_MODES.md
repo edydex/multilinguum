@@ -3,16 +3,21 @@
 Multilinguum presents three product-facing output choices. Provider names stay behind the shared
 provider boundary and are not exposed as normal operator decisions.
 
-| Console choice       | Pipeline                                                                | Behavior                                                                                                                                                              |
-| -------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Generic · Fast       | GPT-Realtime-Translate                                                  | Starts speaking while translated audio is arriving. Lowest delay, but cadence and meaning-sensitive clause context are less reliable.                                 |
-| Generic · Expressive | GPT-Live-Transcribe → glossary-aware text translation → GPT-4o Mini TTS | Waits for a finalized clause and asks the generic renderer for warm, deliberate sermon narration. This is the accuracy-oriented default.                              |
-| _First name_ Voice   | Finalized translated clause → Chatterbox Multilingual V3                | Uses a consented reference for voice identity. If cloned rendering accumulates more than ten seconds of backlog, the live channel falls back to Generic · Expressive. |
+| Console choice       | Pipeline                                                                | Behavior                                                                                                                                                                 |
+| -------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Generic · Fast       | GPT-Realtime-Translate                                                  | Starts speaking while translated audio is arriving. Lowest delay, but cadence and meaning-sensitive clause context are less reliable.                                    |
+| Generic · Expressive | GPT-Live-Transcribe → glossary-aware text translation → GPT-4o Mini TTS | Waits for a finalized clause, renders upcoming clauses ahead, trims synthetic edge silence, and queues gapless natural narration. This is the accuracy-oriented default. |
+| _First name_ Voice   | Finalized translated clause → Chatterbox Multilingual V3                | Uses a consented reference for voice identity. If cloned rendering accumulates more than ten seconds of backlog, the live channel falls back to Generic · Expressive.    |
 
 The console also offers **Add cloned voice…** for the v1 RU→EN channel. It records the speaker,
 authorizer, confirmation date, permitted use, permitted language, reference language, sample hash,
 and encrypted worker location. The raw sample is sent only to the processor and encrypted by the
 voice worker; it is never stored in the desktop renderer or repository.
+
+Expressive speech uses 0.98× as its calm default cadence. It does not compress each translated
+sentence to fit the source window. Gentle catch-up begins only when actual LiveKit playback plus
+in-flight rendering exceeds 20 seconds: 1.03×, then 1.07× above 30 seconds, with a hard 1.12×
+ceiling. The operator's Queue metric is this real playback estimate.
 
 ## What the first clone used
 

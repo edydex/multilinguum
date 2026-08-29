@@ -10,6 +10,7 @@ import type {
   ProcessorEvent,
   RenderedSpeech,
   ServiceSession,
+  SpeechRenderContext,
   SpeechRenderer,
   SourceProcessingTiming,
   TranscriptSegment,
@@ -21,6 +22,11 @@ import { defaultGlossary } from './glossary.js';
 import { buildLatencyBreakdown, summarizeLatency } from './latency.js';
 import type { SermonContextStore } from './context-store.js';
 import type { VoiceProfileStore } from './voice-profile-store.js';
+import {
+  estimateSpeechDurationMs,
+  prepareSpeechForContinuousPlayout,
+  speechDurationMs,
+} from './speech-continuity.js';
 
 export interface SessionEngineDependencies {
   archive: ArchiveStore;
@@ -43,6 +49,8 @@ interface RuntimeChannel {
   effectiveVoiceMode: 'source' | 'natural' | 'cloned';
   precedingText: string[];
   latencySamples: PipelineLatencySample[];
+  audioChain: Promise<void>;
+  pendingAudioEstimateMs: number;
 }
 
 export class SessionEngine {
@@ -61,6 +69,10 @@ export class SessionEngine {
 
   health(): ChannelHealth[] {
     return [...this.#channels.values()].map((channel) => channel.health);
+  }
+
+  async drainAudio(): Promise<void> {
+    await Promise.all([...this.#channels.values()].map((channel) => channel.audioChain));
   }
 
   updateListenerCount(language: ChannelConfig['targetLanguage'], count: number): void {
@@ -136,6 +148,8 @@ export class SessionEngine {
         effectiveVoiceMode: config.voiceMode,
         precedingText: [],
         latencySamples: [],
+        audioChain: Promise.resolve(),
+        pendingAudioEstimateMs: 0,
         health: {
           channelId: config.id,
           targetLanguage: config.targetLanguage,
@@ -178,6 +192,8 @@ export class SessionEngine {
     });
     await this.#dependencies.relay.createSession(startingSession);
     for (const channel of this.#channels.values()) {
+      channel.audioChain = Promise.resolve();
+      channel.pendingAudioEstimateMs = 0;
       channel.health = { ...channel.health, state: 'starting' };
       this.#emitHealth(channel);
       await this.#dependencies.relay.publishChannel(channel.config);
@@ -429,6 +445,7 @@ export class SessionEngine {
     if (!['live', 'failed'].includes(session.state)) throw new Error('Session is not active.');
     this.#session = { ...session, state: 'stopping' };
     this.#emitSession();
+    await this.drainAudio();
     await this.#dependencies.relay.closeSession(session.id);
     const archive = await this.#dependencies.archive.finalize(session.id);
     this.#session = {
@@ -449,15 +466,11 @@ export class SessionEngine {
     if (runtime.config.muted) return undefined;
     const session = this.#requiredSession();
     let translation: LatencySpan | undefined;
-    let speechRender: LatencySpan | undefined;
     let captionPublish: LatencySpan | undefined;
-    let audioPublish: LatencySpan | undefined;
-    let speechRenderer: string | undefined;
     try {
       let translated: TranscriptSegment;
       if (runtime.config.voiceMode === 'source') {
         translated = { ...source, channelId: runtime.config.id };
-        audioPublish = sourceAudioSpan;
       } else {
         const translationStartedAtUnixMs = Date.now();
         try {
@@ -481,8 +494,7 @@ export class SessionEngine {
       }
       runtime.precedingText.push(translated.text);
       runtime.precedingText = runtime.precedingText.slice(-8);
-      const expectedAt = Date.parse(session.startedAt ?? session.createdAt) + source.sourceEndMs;
-      const backlogMs = Math.max(0, Date.now() - expectedAt);
+      const backlogMs = this.#playbackBacklogMs(runtime);
       if (runtime.effectiveVoiceMode === 'cloned' && backlogMs > 10_000) {
         runtime.effectiveVoiceMode = 'natural';
         this.#dependencies.broadcast({
@@ -491,42 +503,52 @@ export class SessionEngine {
           message: 'Cloned output exceeded ten seconds of backlog; switched to natural voice.',
         });
       }
-      await this.#dependencies.archive.appendTranscript(translated);
+
+      const finalCaption: TranscriptSegment = { ...translated, final: true };
+      await this.#dependencies.archive.appendTranscript(finalCaption);
       const captionStartedAtUnixMs = Date.now();
-      await this.#dependencies.relay.publishCaption(translated);
+      await this.#dependencies.relay.publishCaption(
+        runtime.effectiveVoiceMode === 'source' ? finalCaption : { ...finalCaption, final: false },
+      );
       captionPublish = {
         startedAtUnixMs: captionStartedAtUnixMs,
         completedAtUnixMs: Date.now(),
       };
+
       if (runtime.effectiveVoiceMode !== 'source') {
-        const renderStartedAtUnixMs = Date.now();
-        let rendered;
-        try {
-          rendered = await this.#render(runtime, translated);
-        } finally {
-          speechRender = {
-            startedAtUnixMs: renderStartedAtUnixMs,
-            completedAtUnixMs: Date.now(),
-          };
-        }
-        speechRenderer = rendered.renderer;
-        await this.#dependencies.archive.appendAudio(session.id, runtime.config.id, rendered);
-        const audioStartedAtUnixMs = Date.now();
-        await this.#dependencies.relay.publishAudio(runtime.config.id, rendered);
-        audioPublish = {
-          startedAtUnixMs: audioStartedAtUnixMs,
-          completedAtUnixMs: Date.now(),
+        this.#enqueueSpeech({
+          runtime,
+          source,
+          translated: finalCaption,
+          sourceTiming,
+          translation,
+          provisionalCaptionPublish: captionPublish,
+        });
+        const now = new Date().toISOString();
+        runtime.health = {
+          ...runtime.health,
+          state: 'healthy',
+          lastTranscriptAt: now,
+          latencyMs: Math.max(
+            0,
+            sourceTiming?.captureCompletedAtUnixMs === undefined
+              ? backlogMs
+              : captionPublish.completedAtUnixMs - sourceTiming.captureCompletedAtUnixMs,
+          ),
+          backlogMs: this.#playbackBacklogMs(runtime),
+          engine: `${this.#translationProvider(runtime.config).name}+${runtime.effectiveVoiceMode}`,
         };
+        this.#emitHealth(runtime);
+        return finalCaption;
       }
+
       const sample = this.#latencySample({
         runtime,
         source,
         sourceTiming,
         translation,
-        speechRender,
         captionPublish,
-        audioPublish,
-        speechRenderer,
+        audioPublish: sourceAudioSpan,
         outcome: 'complete',
       });
       await this.#recordLatency(runtime, sample);
@@ -546,7 +568,7 @@ export class SessionEngine {
       delete nextHealth.error;
       runtime.health = nextHealth;
       this.#emitHealth(runtime);
-      return translated;
+      return finalCaption;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const sample = this.#latencySample({
@@ -554,10 +576,7 @@ export class SessionEngine {
         source,
         sourceTiming,
         translation,
-        speechRender,
         captionPublish,
-        audioPublish,
-        speechRenderer,
         outcome: 'failed',
         error: message,
       });
@@ -589,6 +608,145 @@ export class SessionEngine {
     }
   }
 
+  #enqueueSpeech(input: {
+    runtime: RuntimeChannel;
+    source: TranscriptSegment;
+    translated: TranscriptSegment;
+    sourceTiming?: SourceProcessingTiming | undefined;
+    translation?: LatencySpan | undefined;
+    provisionalCaptionPublish: LatencySpan;
+  }): void {
+    const session = this.#requiredSession();
+    const estimateMs = estimateSpeechDurationMs(input.translated.text);
+    const playbackBacklogMs = this.#playbackBacklogMs(input.runtime);
+    input.runtime.pendingAudioEstimateMs += estimateMs;
+    const renderStartedAtUnixMs = Date.now();
+    const renderPromise = this.#render(input.runtime, input.translated, {
+      playbackBacklogMs,
+    }).then(
+      (rendered) => ({
+        ok: true as const,
+        rendered: prepareSpeechForContinuousPlayout(rendered),
+        speechRender: {
+          startedAtUnixMs: renderStartedAtUnixMs,
+          completedAtUnixMs: Date.now(),
+        } satisfies LatencySpan,
+      }),
+      (error: unknown) => ({
+        ok: false as const,
+        error,
+        speechRender: {
+          startedAtUnixMs: renderStartedAtUnixMs,
+          completedAtUnixMs: Date.now(),
+        } satisfies LatencySpan,
+      }),
+    );
+
+    input.runtime.audioChain = input.runtime.audioChain.then(async () => {
+      let speechRender: LatencySpan | undefined;
+      let audioPublish: LatencySpan | undefined;
+      let playout: LatencySpan | undefined;
+      let speechRenderer: string | undefined;
+      try {
+        const result = await renderPromise;
+        speechRender = result.speechRender;
+        if (!result.ok) throw result.error;
+        speechRenderer = result.rendered.renderer;
+        const durationMs = speechDurationMs(result.rendered);
+        await this.#dependencies.archive.appendAudio(
+          session.id,
+          input.runtime.config.id,
+          result.rendered,
+        );
+        await this.#dependencies.relay.publishCaption(input.translated);
+        const audioStartedAtUnixMs = Date.now();
+        const queuedBeforeMs = this.#dependencies.relay.audioBacklogMs(input.runtime.config.id);
+        await this.#dependencies.relay.publishAudio(input.runtime.config.id, result.rendered);
+        audioPublish = {
+          startedAtUnixMs: audioStartedAtUnixMs,
+          completedAtUnixMs: Date.now(),
+        };
+        playout = {
+          startedAtUnixMs: audioStartedAtUnixMs + queuedBeforeMs,
+          completedAtUnixMs: audioStartedAtUnixMs + queuedBeforeMs + durationMs,
+        };
+        input.runtime.pendingAudioEstimateMs = Math.max(
+          0,
+          input.runtime.pendingAudioEstimateMs - estimateMs,
+        );
+        const sample = this.#latencySample({
+          runtime: input.runtime,
+          source: input.source,
+          sourceTiming: input.sourceTiming,
+          translation: input.translation,
+          speechRender,
+          captionPublish: input.provisionalCaptionPublish,
+          audioPublish,
+          playout,
+          speechRenderer,
+          outcome: 'complete',
+        });
+        await this.#recordLatency(input.runtime, sample);
+        const measuredLatency =
+          sample.metrics.sourceEndToPlayoutMs ??
+          sample.metrics.sourceEndToAudioMs ??
+          sample.metrics.sourceEndToCaptionMs ??
+          0;
+        const nextHealth: ChannelHealth = {
+          ...input.runtime.health,
+          state: 'healthy',
+          lastTranscriptAt: new Date().toISOString(),
+          lastAudioAt: new Date().toISOString(),
+          latencyMs: Math.max(0, measuredLatency),
+          backlogMs: this.#playbackBacklogMs(input.runtime),
+          engine: `${this.#translationProvider(input.runtime.config).name}+${input.runtime.effectiveVoiceMode}`,
+          latency: summarizeLatency(input.runtime.latencySamples),
+        };
+        delete nextHealth.error;
+        input.runtime.health = nextHealth;
+        this.#emitHealth(input.runtime);
+      } catch (error) {
+        input.runtime.pendingAudioEstimateMs = Math.max(
+          0,
+          input.runtime.pendingAudioEstimateMs - estimateMs,
+        );
+        const message = error instanceof Error ? error.message : String(error);
+        const sample = this.#latencySample({
+          runtime: input.runtime,
+          source: input.source,
+          sourceTiming: input.sourceTiming,
+          translation: input.translation,
+          speechRender,
+          captionPublish: input.provisionalCaptionPublish,
+          audioPublish,
+          playout,
+          speechRenderer,
+          outcome: 'failed',
+          error: message,
+        });
+        await this.#recordLatency(input.runtime, sample).catch(() => undefined);
+        input.runtime.health = {
+          ...input.runtime.health,
+          state: input.runtime.effectiveVoiceMode === 'cloned' ? 'degraded' : 'failed',
+          backlogMs: this.#playbackBacklogMs(input.runtime),
+          error: message,
+          ...(input.runtime.latencySamples.length > 0
+            ? { latency: summarizeLatency(input.runtime.latencySamples) }
+            : {}),
+        };
+        if (input.runtime.effectiveVoiceMode === 'cloned') {
+          input.runtime.effectiveVoiceMode = 'natural';
+        }
+        this.#emitHealth(input.runtime);
+        this.#dependencies.broadcast({
+          type: 'error',
+          scope: input.runtime.config.id,
+          message,
+        });
+      }
+    });
+  }
+
   async #processSourceTranscript(
     source: TranscriptSegment,
     timing: SourceProcessingTiming | undefined,
@@ -608,13 +766,20 @@ export class SessionEngine {
     return results.filter((segment): segment is TranscriptSegment => Boolean(segment));
   }
 
-  async #render(runtime: RuntimeChannel, segment: TranscriptSegment) {
+  async #render(runtime: RuntimeChannel, segment: TranscriptSegment, context: SpeechRenderContext) {
     if (runtime.effectiveVoiceMode === 'cloned') {
       if (!this.#dependencies.clonedSpeech) throw new Error('Cloned renderer is not configured.');
       const profile = await this.#voiceProfile(runtime.config);
-      return this.#dependencies.clonedSpeech.render(segment, profile);
+      return this.#dependencies.clonedSpeech.render(segment, profile, context);
     }
-    return this.#naturalRenderer().render(segment);
+    return this.#naturalRenderer().render(segment, undefined, context);
+  }
+
+  #playbackBacklogMs(runtime: RuntimeChannel): number {
+    return Math.max(
+      0,
+      this.#dependencies.relay.audioBacklogMs(runtime.config.id) + runtime.pendingAudioEstimateMs,
+    );
   }
 
   #latencySample(input: {
@@ -625,6 +790,7 @@ export class SessionEngine {
     speechRender?: LatencySpan | undefined;
     captionPublish?: LatencySpan | undefined;
     audioPublish?: LatencySpan | undefined;
+    playout?: LatencySpan | undefined;
     speechRenderer?: string | undefined;
     translationEngine?: string | undefined;
     outcome: 'complete' | 'failed';
@@ -652,6 +818,7 @@ export class SessionEngine {
       ...(input.speechRender ? { speechRender: input.speechRender } : {}),
       ...(input.captionPublish ? { captionPublish: input.captionPublish } : {}),
       ...(input.audioPublish ? { audioPublish: input.audioPublish } : {}),
+      ...(input.playout ? { playout: input.playout } : {}),
       engines: {
         ...(input.sourceTiming?.transcription
           ? { transcription: input.sourceTiming.transcriptionEngine ?? 'capture-transcriber' }

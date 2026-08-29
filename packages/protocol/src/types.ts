@@ -121,10 +121,13 @@ export interface PipelineLatencyBreakdown {
   speechRenderMs?: number;
   captionPublishMs?: number;
   audioPublishMs?: number;
+  playoutQueueMs?: number;
   sourceEndToTranscriptMs?: number;
   sourceEndToCaptionMs?: number;
   sourceEndToAudioMs?: number;
   sourceStartToAudioMs?: number;
+  sourceEndToPlayoutMs?: number;
+  sourceStartToPlayoutMs?: number;
 }
 
 export interface PipelineLatencySample {
@@ -143,6 +146,7 @@ export interface PipelineLatencySample {
   speechRender?: LatencySpan;
   captionPublish?: LatencySpan;
   audioPublish?: LatencySpan;
+  playout?: LatencySpan;
   metrics: PipelineLatencyBreakdown;
   engines: {
     transcription?: string;

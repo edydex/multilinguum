@@ -36,6 +36,7 @@ describe('latency summary', () => {
       recordedAt: new Date(0).toISOString(),
       captureCompletedAtUnixMs: 10_000,
       audioPublish: { startedAtUnixMs: 12_500, completedAtUnixMs: 12_900 },
+      playout: { startedAtUnixMs: 20_500, completedAtUnixMs: 23_000 },
       engines: { relay: 'test' },
       outcome: 'complete',
     });
@@ -43,6 +44,9 @@ describe('latency summary', () => {
     expect(metrics.sourceEndToAudioMs).toBe(2_500);
     expect(metrics.sourceStartToAudioMs).toBe(4_500);
     expect(metrics.audioPublishMs).toBe(400);
+    expect(metrics.playoutQueueMs).toBe(8_000);
+    expect(metrics.sourceEndToPlayoutMs).toBe(10_500);
+    expect(metrics.sourceStartToPlayoutMs).toBe(12_500);
   });
 
   it('uses nearest-rank p50 and p95 without mixing unavailable stages', () => {
