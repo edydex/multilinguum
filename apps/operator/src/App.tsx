@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { estimateCloudServiceCost } from '@multilinguum/protocol';
 import type {
   ArchiveManifest,
   ChannelConfig,
@@ -67,6 +68,34 @@ function initialTargets(source: 'en' | 'ru'): Record<Language, TargetDraft> {
   ) as Record<Language, TargetDraft>;
 }
 
+function channelConfigs(
+  source: 'en' | 'ru',
+  targets: Record<Language, TargetDraft>,
+): ChannelConfig[] {
+  return allLanguages
+    .filter((language) => targets[language]!.enabled)
+    .map((language) => {
+      const draft = targets[language]!;
+      return {
+        id: `channel-${language}`,
+        targetLanguage: language,
+        translationProvider:
+          language === source
+            ? 'deterministic'
+            : draft.outputMode === 'generic-fast'
+              ? 'openai-realtime'
+              : 'openai-cascade',
+        voiceMode:
+          language === source ? 'source' : draft.outputMode === 'cloned' ? 'cloned' : 'natural',
+        ...(draft.outputMode === 'cloned' && draft.profileId
+          ? { voiceProfileId: draft.profileId }
+          : {}),
+        fallbackOrder: language === source ? ['mute'] : ['natural', 'mute'],
+        muted: false,
+      } satisfies ChannelConfig;
+    });
+}
+
 function formatLatency(milliseconds: number): string {
   return milliseconds < 1_000 ? `${milliseconds} ms` : `${(milliseconds / 1_000).toFixed(1)} s`;
 }
@@ -128,6 +157,11 @@ export function App() {
   } = audio;
 
   const connection = useMemo<OperatorConnection>(() => ({ baseUrl, token }), [baseUrl, token]);
+  const nextChannelConfigs = useMemo(() => channelConfigs(source, targets), [source, targets]);
+  const nextServiceEstimateUsd = useMemo(
+    () => estimateCloudServiceCost(120, nextChannelConfigs),
+    [nextChannelConfigs],
+  );
   const live = session?.state === 'live' || session?.state === 'starting';
   const configuredSource = live && session ? session.sourceLanguage : source;
   const displayedLanguages: Language[] =
@@ -292,31 +326,9 @@ export function App() {
     setBusy(true);
     setError(undefined);
     try {
-      const channelConfigs: ChannelConfig[] = allLanguages
-        .filter((language) => targets[language]!.enabled)
-        .map((language) => {
-          const draft = targets[language]!;
-          return {
-            id: `channel-${language}`,
-            targetLanguage: language,
-            translationProvider:
-              language === source
-                ? 'deterministic'
-                : draft.outputMode === 'generic-fast'
-                  ? 'openai-realtime'
-                  : 'openai-cascade',
-            voiceMode:
-              language === source ? 'source' : draft.outputMode === 'cloned' ? 'cloned' : 'natural',
-            ...(draft.outputMode === 'cloned' && draft.profileId
-              ? { voiceProfileId: draft.profileId }
-              : {}),
-            fallbackOrder: language === source ? ['mute'] : ['natural', 'mute'],
-            muted: false,
-          };
-        });
       await api.create(connection, {
         sourceLanguage: source,
-        targets: channelConfigs,
+        targets: nextChannelConfigs,
         processingNode: {
           id: 'local-node',
           name: baseUrl.includes('127.0.0.1') ? 'This Mac' : 'Paired processor',
@@ -501,9 +513,9 @@ export function App() {
                 <span>{live ? '■' : '▶'}</span>
                 {busy ? 'Working…' : live ? 'Stop service' : 'Start service'}
               </button>
-              {!live && session?.estimatedCostUsd !== undefined && (
+              {!live && (
                 <div className="cost">
-                  Estimated two-hour API cost: ${session.estimatedCostUsd.toFixed(2)}
+                  Estimated two-hour API cost: ${nextServiceEstimateUsd.toFixed(2)}
                 </div>
               )}
             </section>
