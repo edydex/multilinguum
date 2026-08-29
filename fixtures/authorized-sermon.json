@@ -11,5 +11,13 @@
     "end": "00:08:45",
     "expectedDurationSeconds": 45,
     "expectedWavSha256": "f8bfae7555bbecebb92a43decdb44289867a56a6e43e7443586ea7ac9c6bb0f0"
+  },
+  "voiceCloneApproval": {
+    "reportedBy": "project owner",
+    "confirmedAt": "2026-08-29",
+    "scope": "Consented RU-to-EN translated church-service output using the authorized preacher voice profile",
+    "approvedOutputSha256": "4c0b5a089435f9e07d10c999caccc94730b94e08b407917d1b2b0092850279e6",
+    "decision": "approved",
+    "note": "The project owner reported that the preacher renewed approval of the tested voice identity and naturalness. No numeric rating was reported."
   }
 }
