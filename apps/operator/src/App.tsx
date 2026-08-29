@@ -99,11 +99,11 @@ export function App() {
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | undefined>(
     () => localStorage.getItem('audioDeviceId') || undefined,
   );
-  const [inputEnabled, setInputEnabled] = useState(false);
+  const [boothDeviceLabel, setBoothDeviceLabel] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [playbackUrl, setPlaybackUrl] = useState<string>();
-  const audio = useAudioMeter(selectedDeviceId, inputEnabled);
+  const audio = useAudioMeter(selectedDeviceId);
   const {
     devices,
     levelDb,
@@ -124,15 +124,28 @@ export function App() {
   );
 
   useEffect(() => {
-    void invoke<{ processorUrl?: string; processorToken?: string }>('bootstrap_connection')
+    void invoke<{
+      processorUrl?: string;
+      processorToken?: string;
+      audioDeviceLabel?: string;
+    }>('bootstrap_connection')
       .then((bootstrap) => {
         if (bootstrap.processorUrl) setBaseUrl(bootstrap.processorUrl);
         if (bootstrap.processorToken) setToken(bootstrap.processorToken);
+        if (bootstrap.audioDeviceLabel) setBoothDeviceLabel(bootstrap.audioDeviceLabel);
       })
       .catch(() => {
         // The same React UI can run in a browser during development, where Tauri IPC is absent.
       });
   }, []);
+
+  useEffect(() => {
+    if (!boothDeviceLabel) return;
+    const configured = devices.find((device) => device.label === boothDeviceLabel);
+    if (!configured) return;
+    if (configured.id !== selectedDeviceId) setSelectedDeviceId(configured.id);
+    setBoothDeviceLabel(undefined);
+  }, [boothDeviceLabel, devices, selectedDeviceId]);
 
   const refresh = useCallback(async () => {
     try {
@@ -424,7 +437,7 @@ export function App() {
               </div>
               <button
                 className={`start-button ${live ? 'stop' : ''}`}
-                disabled={busy || (!live && !inputEnabled)}
+                disabled={busy}
                 onClick={() => void (live ? stop() : start())}
               >
                 <span>{live ? '■' : '▶'}</span>
@@ -445,8 +458,7 @@ export function App() {
                     <h2>Mixer feed</h2>
                   </div>
                   <span className="ok">
-                    {capture.streaming ? 'Streaming' : inputEnabled ? 'Monitoring' : 'Input off'} ·
-                    48 kHz mono · shared input
+                    {capture.streaming ? 'Streaming' : 'Ready'} · 48 kHz mono · shared input
                   </span>
                 </div>
                 <label>
@@ -454,10 +466,7 @@ export function App() {
                   <select
                     disabled={live}
                     value={selectedDeviceId ?? ''}
-                    onChange={(event) => {
-                      setInputEnabled(false);
-                      setSelectedDeviceId(event.target.value || undefined);
-                    }}
+                    onChange={(event) => setSelectedDeviceId(event.target.value || undefined)}
                   >
                     <option value="">System default</option>
                     {devices.map((device) => (
@@ -467,14 +476,6 @@ export function App() {
                     ))}
                   </select>
                 </label>
-                {(!live || !inputEnabled) && (
-                  <button
-                    className="secondary"
-                    onClick={() => setInputEnabled((current) => (live ? true : !current))}
-                  >
-                    {inputEnabled ? 'Disable input monitor' : 'Enable selected input'}
-                  </button>
-                )}
                 <div className="meter" aria-label={`Input level ${levelDb.toFixed(1)} dBFS`}>
                   <span style={{ width: `${Math.max(1, dbToMeterPercent(levelDb))}%` }} />
                 </div>
@@ -486,17 +487,11 @@ export function App() {
                   <span>0 dB</span>
                 </div>
                 <p className="field-note">
-                  {inputEnabled ? (
-                    <>
-                      {Math.round(sampleRate / 1_000)} kHz device ·{' '}
-                      {channelCount > 1
-                        ? `using channel ${activeChannel + 1} of ${channelCount}`
-                        : 'single input channel'}
-                      . One shared read-only stream is open; OBS may use the same device.
-                    </>
-                  ) : (
-                    'Choose the device first, then enable it. Multilinguum will not open or switch an input automatically.'
-                  )}
+                  {Math.round(sampleRate / 1_000)} kHz device ·{' '}
+                  {channelCount > 1
+                    ? `using channel ${activeChannel + 1} of ${channelCount}`
+                    : 'single input channel'}
+                  . One shared read-only stream is open; OBS may use the same device.
                 </p>
               </section>
 

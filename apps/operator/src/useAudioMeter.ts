@@ -21,7 +21,7 @@ interface WorkletFrame {
 
 type PcmListener = (frame: CapturedPcmFrame) => void;
 
-export function useAudioMeter(selectedDeviceId: string | undefined, enabled: boolean) {
+export function useAudioMeter(selectedDeviceId?: string) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [levelDb, setLevelDb] = useState(-60);
   const [activeChannel, setActiveChannel] = useState(0);
@@ -59,13 +59,6 @@ export function useAudioMeter(selectedDeviceId: string | undefined, enabled: boo
   }, []);
 
   useEffect(() => {
-    if (!enabled) {
-      setLevelDb(-60);
-      setActiveChannel(0);
-      setChannelCount(0);
-      setError(undefined);
-      return;
-    }
     let cancelled = false;
     let stream: MediaStream | undefined;
     let context: AudioContext | undefined;
@@ -135,7 +128,7 @@ export function useAudioMeter(selectedDeviceId: string | undefined, enabled: boo
       stream?.getTracks().forEach((track) => track.stop());
       void context?.close();
     };
-  }, [enabled, selectedDeviceId]);
+  }, [selectedDeviceId]);
 
   return {
     devices,
