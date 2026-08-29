@@ -190,7 +190,7 @@ export function App() {
         <div className="church-mark">✦</div>
         <p>{service.churchName}</p>
         <h1>Live translation</h1>
-        <span className="delay">Approximately 5–10 seconds behind the room</span>
+        <span className="delay">Approximately 5–15 seconds behind, depending on voice mode</span>
       </header>
 
       {!service.active ? (
