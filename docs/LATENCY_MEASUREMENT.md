@@ -27,3 +27,11 @@ Routine development uses deterministic replay and retained timing/provider fixtu
 3. the final end-to-end/load/venue acceptance runs.
 
 A single initial cloud run cannot replace the short live rehearsal because recorded-file success does not exercise streaming deltas, reconnects, queue growth, or listener delivery.
+
+For a paid compatibility benchmark on the processor host, run:
+
+```sh
+docker compose exec -T processor node dist/cloud-benchmark.js
+```
+
+The benchmark creates its own non-private Russian speech fixture with the configured natural TTS model, streams the 24 kHz PCM in wall-clock time to both GPT-Realtime-Translate and GPT-Live-Transcribe, and writes source audio, translated audio, and a JSON timing report under `/tmp/multilinguum-cloud-benchmark` in the processor container. The report separates the first live-transcription delta, the translation session's source-transcript delta, translated transcript delta, translated audio delta, and tail-drain time.
