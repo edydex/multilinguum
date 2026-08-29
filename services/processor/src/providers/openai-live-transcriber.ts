@@ -20,6 +20,11 @@ interface ItemTiming {
   firstDeltaAtUnixMs?: number;
 }
 
+interface CommittedWindow {
+  startMs: number;
+  endMs: number;
+}
+
 export interface TranscriptionSecretProvider {
   create(input: { model: string; sourceLanguage: 'en' | 'ru' }): Promise<string>;
 }
@@ -43,7 +48,6 @@ class OpenAITranscriptionSecretProvider implements TranscriptionSecretProvider {
         audio: {
           input: {
             format: { type: 'audio/pcm', rate: 24_000 },
-            noise_reduction: { type: 'far_field' },
             transcription: {
               model: input.model,
               prompt,
@@ -51,14 +55,7 @@ class OpenAITranscriptionSecretProvider implements TranscriptionSecretProvider {
               languages: [input.sourceLanguage],
               delay: 'low',
             },
-            turn_detection: {
-              type: 'server_vad',
-              threshold: 0.45,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 650,
-              create_response: false,
-              interrupt_response: false,
-            },
+            turn_detection: null,
           },
         },
       },
@@ -75,11 +72,17 @@ export class OpenAILiveTranscriber implements Transcriber {
   readonly #segmentListeners = new Set<(segment: TranscriptSegment) => void>();
   readonly #errorListeners = new Set<(error: Error) => void>();
   readonly #itemTiming = new Map<string, ItemTiming>();
+  readonly #committedWindows: CommittedWindow[] = [];
+  readonly #unassignedItemIds: string[] = [];
+  readonly #drainWaiters = new Set<() => void>();
   #connection: RealtimeConnection | undefined;
   #session?: ServiceSession;
   #sequence = 0;
   #lastAudioEndMs = 0;
   readonly #stopDrainMs: number;
+  readonly #commitIntervalMs: number;
+  #commitWindowStartMs = 0;
+  #pendingCommits = 0;
   #stopping = false;
 
   constructor(
@@ -89,13 +92,15 @@ export class OpenAILiveTranscriber implements Transcriber {
       secretProvider?: TranscriptionSecretProvider;
       connectionFactory?: RealtimeConnectionFactory;
       stopDrainMs?: number;
+      commitIntervalMs?: number;
     } = {},
   ) {
     this.#model = model;
     this.name = `openai-live-transcribe:${model}`;
     this.#secretProvider = options.secretProvider ?? new OpenAITranscriptionSecretProvider(apiKey);
     this.#connectionFactory = options.connectionFactory ?? createWebSocketRealtimeConnection;
-    this.#stopDrainMs = options.stopDrainMs ?? 2_000;
+    this.#stopDrainMs = options.stopDrainMs ?? 15_000;
+    this.#commitIntervalMs = options.commitIntervalMs ?? 4_000;
   }
 
   async start(session: ServiceSession): Promise<void> {
@@ -104,7 +109,12 @@ export class OpenAILiveTranscriber implements Transcriber {
     this.#stopping = false;
     this.#sequence = 0;
     this.#lastAudioEndMs = 0;
+    this.#commitWindowStartMs = 0;
+    this.#pendingCommits = 0;
     this.#itemTiming.clear();
+    this.#committedWindows.splice(0);
+    this.#unassignedItemIds.splice(0);
+    this.#drainWaiters.clear();
     const secret = await this.#secretProvider.create({
       model: this.#model,
       sourceLanguage: session.sourceLanguage,
@@ -134,6 +144,9 @@ export class OpenAILiveTranscriber implements Transcriber {
       type: 'input_audio_buffer.append',
       audio: Buffer.from(data).toString('base64'),
     });
+    if (this.#lastAudioEndMs - this.#commitWindowStartMs >= this.#commitIntervalMs) {
+      this.#commit(this.#lastAudioEndMs);
+    }
   }
 
   async stop(): Promise<void> {
@@ -141,13 +154,11 @@ export class OpenAILiveTranscriber implements Transcriber {
     this.#connection = undefined;
     if (!connection) return;
     this.#stopping = true;
-    if (this.#stopDrainMs > 0 && this.#lastAudioEndMs > 0) {
-      const completed = connection.waitFor(
-        'conversation.item.input_audio_transcription.completed',
-        this.#stopDrainMs,
-      );
-      connection.send({ type: 'input_audio_buffer.commit' });
-      await completed.catch(() => undefined);
+    if (this.#lastAudioEndMs > this.#commitWindowStartMs) {
+      this.#commit(this.#lastAudioEndMs, connection);
+    }
+    if (this.#stopDrainMs > 0 && this.#pendingCommits > 0) {
+      await this.#waitForDrain(this.#stopDrainMs);
     }
     connection.close();
   }
@@ -187,7 +198,7 @@ export class OpenAILiveTranscriber implements Transcriber {
       return;
     }
     if (event.type === 'conversation.item.input_audio_transcription.delta' && itemId) {
-      const timing = this.#itemTiming.get(itemId) ?? {};
+      const timing = this.#timingForItem(itemId);
       timing.firstDeltaAtUnixMs ??= Date.now();
       this.#itemTiming.set(itemId, timing);
       return;
@@ -201,8 +212,13 @@ export class OpenAILiveTranscriber implements Transcriber {
       return;
     }
     const text = event.transcript.trim();
+    this.#pendingCommits = Math.max(0, this.#pendingCommits - 1);
+    if (this.#pendingCommits === 0) {
+      for (const resolve of this.#drainWaiters) resolve();
+      this.#drainWaiters.clear();
+    }
     if (!text) return;
-    const timing = this.#itemTiming.get(itemId) ?? {};
+    const timing = this.#timingForItem(itemId);
     const sourceStartMs = Math.max(0, Math.round(timing.startMs ?? this.#lastAudioEndMs));
     const sourceEndMs = Math.max(
       sourceStartMs + 1,
@@ -225,5 +241,41 @@ export class OpenAILiveTranscriber implements Transcriber {
     };
     for (const listener of this.#segmentListeners) listener(segment);
     this.#itemTiming.delete(itemId);
+  }
+
+  #commit(endMs: number, connection = this.#connection): void {
+    if (!connection || endMs <= this.#commitWindowStartMs) return;
+    const window = { startMs: this.#commitWindowStartMs, endMs };
+    const itemId = this.#unassignedItemIds.shift();
+    if (itemId) {
+      this.#itemTiming.set(itemId, { ...this.#itemTiming.get(itemId), ...window });
+    } else {
+      this.#committedWindows.push(window);
+    }
+    connection.send({ type: 'input_audio_buffer.commit' });
+    this.#pendingCommits += 1;
+    this.#commitWindowStartMs = endMs;
+  }
+
+  #timingForItem(itemId: string): ItemTiming {
+    const existing = this.#itemTiming.get(itemId);
+    if (existing) return existing;
+    const window = this.#committedWindows.shift();
+    if (window) return { ...window };
+    this.#unassignedItemIds.push(itemId);
+    return {};
+  }
+
+  async #waitForDrain(timeoutMs: number): Promise<void> {
+    if (this.#pendingCommits === 0) return;
+    await new Promise<void>((resolve) => {
+      const finish = () => {
+        clearTimeout(timeout);
+        this.#drainWaiters.delete(finish);
+        resolve();
+      };
+      const timeout = setTimeout(finish, timeoutMs);
+      this.#drainWaiters.add(finish);
+    });
   }
 }

@@ -102,7 +102,7 @@ function channel(): ChannelConfig {
   };
 }
 
-function captureChunk(): AudioChunk {
+function captureChunk(endMs = 1): AudioChunk {
   const data = new Uint8Array(8);
   const view = new DataView(data.buffer);
   view.setInt16(0, 1_000, true);
@@ -114,39 +114,30 @@ function captureChunk(): AudioChunk {
     encoding: 'pcm_s16le',
     sampleRate: 48_000,
     startMs: 0,
-    endMs: 1,
+    endMs,
     sequence: 0,
   };
 }
 
 describe('OpenAI Realtime provider adapters', () => {
-  it('normalizes live transcription VAD timing into finalized source segments', async () => {
+  it('normalizes explicitly committed live transcription windows into finalized segments', async () => {
     const connection = new FakeRealtimeConnection();
     const factory: RealtimeConnectionFactory = () => connection;
     const transcriber = new OpenAILiveTranscriber('not-used-in-test', 'gpt-live-transcribe', {
       connectionFactory: factory,
       secretProvider: { create: async () => 'short-lived-test-secret' },
       stopDrainMs: 0,
+      commitIntervalMs: 4_000,
     });
     const segments: TranscriptSegment[] = [];
     transcriber.onSegment((segment) => segments.push(segment));
 
     await transcriber.start(session());
-    await transcriber.pushAudio(captureChunk());
-    connection.emit({
-      type: 'input_audio_buffer.speech_started',
-      item_id: 'item-1',
-      audio_start_ms: 200,
-    });
+    await transcriber.pushAudio(captureChunk(4_000));
     connection.emit({
       type: 'conversation.item.input_audio_transcription.delta',
       item_id: 'item-1',
       delta: 'Благодать',
-    });
-    connection.emit({
-      type: 'input_audio_buffer.speech_stopped',
-      item_id: 'item-1',
-      audio_end_ms: 1_600,
     });
     connection.emit({
       type: 'conversation.item.input_audio_transcription.completed',
@@ -160,8 +151,8 @@ describe('OpenAI Realtime provider adapters', () => {
       channelId: 'source-ru',
       language: 'ru',
       text: 'Благодать вам и мир.',
-      sourceStartMs: 200,
-      sourceEndMs: 1_600,
+      sourceStartMs: 0,
+      sourceEndMs: 4_000,
       firstDeltaAtUnixMs: expect.any(Number),
       final: true,
       sequence: 0,
@@ -170,6 +161,7 @@ describe('OpenAI Realtime provider adapters', () => {
     expect(append.type).toBe('input_audio_buffer.append');
     const downsampled = Buffer.from(append.audio, 'base64');
     expect([...downsampled]).toEqual([0xd0, 0x07, 0x30, 0xf8]);
+    expect(connection.sent[1]).toEqual({ type: 'input_audio_buffer.commit' });
     await transcriber.stop();
     expect(connection.closed).toBe(true);
   });
