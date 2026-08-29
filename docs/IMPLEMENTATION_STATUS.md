@@ -20,13 +20,24 @@ This document distinguishes implemented code from claims that require external s
 ## Implemented but not externally verified
 
 - OpenAI file transcription, Responses translation, and natural speech requests.
-- Chatterbox Multilingual V3 CUDA model loading and synthesis.
 - LiveKit server-side track connection, publication, and listener subscription.
 - Cloudflare deployment and stable public hostname.
-- Linux/NVIDIA Docker images and GPU reservation.
 - Remote capture through a TLS reverse proxy.
 
-These paths require real credentials, network services, and/or the Linux GPU host.
+These paths still require real credentials, network services, or public ingress.
+
+## Verified on the Linux/NVIDIA node
+
+The `vr-mayos` SSH target resolves to the throwaway `video-redactor-gpu` Debian host. On 2026-08-29, the checked-out repository, processor, and CUDA voice worker were verified clean and healthy on an RTX 5060 Ti with 16 GB VRAM.
+
+- The worker loaded Chatterbox Multilingual V3 from its pinned official source revision with PyTorch 2.7.1 and CUDA 12.8.
+- A warm direct render completed in 3.71 seconds and produced 7.44 seconds of audio.
+- The integrated processor-to-cloned-voice-to-Opus replay completed in 2.20 seconds.
+- The approved Opus artifact SHA-256 is `4c0b5a089435f9e07d10c999caccc94730b94e08b407917d1b2b0092850279e6`.
+- Revocation was exercised independently and blocked rendering; a consented ready profile is installed for the authorized preacher.
+- The project owner subsequently reported renewed preacher approval of the tested identity and naturalness. The committed fixture records that approval without inventing a numeric score.
+
+This closes the hardware installation and basic cloned-voice feasibility gate. It does not close the two-hour latency/load gate or venue acceptance.
 
 ## Still to implement
 
