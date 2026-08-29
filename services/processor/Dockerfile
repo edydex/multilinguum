@@ -9,7 +9,7 @@ COPY packages/protocol packages/protocol
 COPY services/processor services/processor
 RUN pnpm --filter @multilinguum/protocol build \
     && pnpm --filter @multilinguum/processor build \
-    && pnpm deploy --filter @multilinguum/processor --prod /output
+    && pnpm deploy --legacy --filter @multilinguum/processor --prod /output
 
 FROM node:24-bookworm-slim
 ENV NODE_ENV=production
