@@ -9,7 +9,6 @@ if (!apiKey) throw new Error('OPENAI_API_KEY is required.');
 const outputDirectory = process.env.BENCHMARK_OUTPUT_DIR ?? '/tmp/multilinguum-cloud-benchmark';
 const translationModel = process.env.OPENAI_TRANSLATE_MODEL ?? 'gpt-realtime-translate';
 const transcriptionModel = process.env.OPENAI_TRANSCRIBE_MODEL ?? 'gpt-live-transcribe';
-const realtimeSessionModel = process.env.OPENAI_REALTIME_SESSION_MODEL ?? 'gpt-realtime-2.1';
 const ttsModel = process.env.OPENAI_TTS_MODEL ?? 'gpt-4o-mini-tts';
 const targetLanguage = process.env.BENCHMARK_TARGET_LANGUAGE ?? 'en';
 const safetyIdentifier = 'multilinguum-synthetic-benchmark';
@@ -38,11 +37,11 @@ class RealtimeConnection {
   readonly #waiters = new Map<string, Array<(event: RealtimeEvent) => void>>();
   readonly #onEvent: (event: RealtimeEvent) => void;
 
-  constructor(url: string, onEvent: (event: RealtimeEvent) => void) {
+  constructor(url: string, onEvent: (event: RealtimeEvent) => void, bearerToken = apiKey) {
     this.#onEvent = onEvent;
     this.socket = new WebSocket(url, {
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: `Bearer ${bearerToken}`,
         'OpenAI-Safety-Identifier': safetyIdentifier,
       },
     });
@@ -152,6 +151,25 @@ const sourcePcm = Buffer.from(await sourceResponse.arrayBuffer());
 const synthesisCompletedAt = Date.now();
 const sourceDurationMs = Math.round((sourcePcm.byteLength / 2 / 24_000) * 1_000);
 if (sourceDurationMs < 10_000) throw new Error('Synthetic source audio is unexpectedly short.');
+const transcriptionClientSecret = await client.realtime.clientSecrets.create({
+  expires_after: { anchor: 'created_at', seconds: 600 },
+  session: {
+    type: 'transcription',
+    audio: {
+      input: {
+        format: { type: 'audio/pcm', rate: 24_000 },
+        transcription: {
+          model: transcriptionModel,
+          prompt: 'Русская церковная проповедь о благодати, надежде, Писании и Господе.',
+          keywords: ['Благодать', 'Писание', 'Господь', 'надежда'],
+          languages: ['ru'],
+          delay: 'low',
+        },
+        turn_detection: null,
+      },
+    },
+  },
+});
 
 const translationInput: TimingState = { transcript: '' };
 const translationOutput: TimingState = { transcript: '' };
@@ -176,7 +194,7 @@ const translation = new RealtimeConnection(
   },
 );
 const transcription = new RealtimeConnection(
-  `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(realtimeSessionModel)}`,
+  'wss://api.openai.com/v1/realtime',
   (event) => {
     const now = Date.now();
     if (event.type === 'conversation.item.input_audio_transcription.delta') {
@@ -187,6 +205,7 @@ const transcription = new RealtimeConnection(
       if (typeof event.transcript === 'string') liveTranscription.transcript = event.transcript;
     }
   },
+  transcriptionClientSecret.value,
 );
 
 await Promise.all([translation.open(), transcription.open()]);
@@ -195,27 +214,7 @@ translation.send({
   type: 'session.update',
   session: { audio: { output: { language: targetLanguage } } },
 });
-const transcriptionUpdated = transcription.waitFor('session.updated');
-transcription.send({
-  type: 'session.update',
-  session: {
-    type: 'transcription',
-    audio: {
-      input: {
-        format: { type: 'audio/pcm', rate: 24_000 },
-        transcription: {
-          model: transcriptionModel,
-          prompt: 'Русская церковная проповедь о благодати, надежде, Писании и Господе.',
-          keywords: ['Благодать', 'Писание', 'Господь', 'надежда'],
-          languages: ['ru'],
-          delay: 'low',
-        },
-        turn_detection: null,
-      },
-    },
-  },
-});
-await Promise.all([translationUpdated, transcriptionUpdated]);
+await translationUpdated;
 
 const streamStartedAt = Date.now();
 const bytesPer20Ms = 24_000 * 2 * 0.02;
@@ -261,7 +260,6 @@ const report = {
   models: {
     translation: translationModel,
     transcription: transcriptionModel,
-    transcriptionSession: realtimeSessionModel,
     sourceSpeechGeneration: ttsModel,
   },
   timing: {
