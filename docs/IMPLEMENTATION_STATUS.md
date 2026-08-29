@@ -17,6 +17,8 @@ This document distinguishes implemented code from claims that require external s
 - Tauri/Rust shell compile-checks on macOS.
 - The private fixture is 45.000 seconds, 48 kHz mono PCM and matches the committed SHA-256.
 - Per-segment capture, transcription, translation, voice, relay, and end-to-end timings are separated, summarized as latest/p50/p95, shown in the operator, and stored in an integrity-hashed JSONL report.
+- A paid synthetic RU to EN streaming benchmark exercised `gpt-live-transcribe` and `gpt-realtime-translate` concurrently with stage timing and retained audio/report evidence.
+- A glossary-aware `gpt-5.6-terra` benchmark corrected both meaning-sensitive errors observed in direct realtime output; its 117 input and 42 output tokens were verified in the dashboard as complimentary data-sharing incentive traffic with $0 model cost.
 
 ## Implemented but not externally verified
 
@@ -26,6 +28,8 @@ This document distinguishes implemented code from claims that require external s
 - Remote capture through a TLS reverse proxy.
 
 These paths still require real credentials, network services, or public ingress.
+
+The standalone paid benchmark harness is externally verified, but the production SessionEngine does not yet use the direct Realtime adapters. See [the 2026-08-29 benchmark report](benchmarks/2026-08-29-openai-ru-en.md) for measured timings, cost, retained hashes, and the direct translator's accuracy failure.
 
 ## Verified on the Linux/NVIDIA node
 

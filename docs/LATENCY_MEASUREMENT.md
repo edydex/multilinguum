@@ -35,3 +35,7 @@ docker compose exec -T processor node dist/cloud-benchmark.js
 ```
 
 The benchmark creates its own non-private Russian speech fixture with the configured natural TTS model, streams the 24 kHz PCM in wall-clock time to both GPT-Realtime-Translate and GPT-Live-Transcribe, and writes source audio, translated audio, and a JSON timing report under `/tmp/multilinguum-cloud-benchmark` in the processor container. The report separates the first live-transcription delta, the translation session's source-transcript delta, translated transcript delta, translated audio delta, and tail-drain time.
+
+The translation protocol's per-event `elapsed_ms` is alignment metadata, not a unique event identifier or direct capture-to-listener latency. Silence padding can make arrival-minus-`elapsed_ms` audio percentiles look much worse than audible output. Do not use those percentiles as an acceptance result; measure trimmed, paced audio at the listener after relay integration.
+
+The first measured paid result and its limitations are recorded in [the 2026-08-29 OpenAI RU to EN report](benchmarks/2026-08-29-openai-ru-en.md).

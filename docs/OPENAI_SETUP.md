@@ -42,3 +42,5 @@ docker compose exec -T processor node dist/complimentary-benchmark.js
 ```
 
 Confirm the request in the Usage dashboard: incentive tokens appear in usage under the data-sharing incentive service tier but do not appear as cost.
+
+This was verified on 2026-08-29: the glossary benchmark's 117 input tokens and 42 output tokens were both classified as `Data sharing incentive tier`, while the Terra input/output spend categories remained $0. Paid Realtime Translate, Live Transcribe, and TTS spend appeared separately. See [the benchmark report](benchmarks/2026-08-29-openai-ru-en.md).
