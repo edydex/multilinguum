@@ -1,6 +1,7 @@
 import type {
   ArchiveManifest,
   ChannelHealth,
+  ContextDocument,
   ProcessorEvent,
   ServiceSession,
   VoiceProfile,
@@ -70,6 +71,30 @@ async function uploadVoiceSample(
   return (await response.json()) as VoiceProfile;
 }
 
+async function uploadContextDocument(
+  connection: OperatorConnection,
+  file: File,
+): Promise<ContextDocument> {
+  const contentType =
+    file.type === 'application/pdf' || file.name.toLocaleLowerCase().endsWith('.pdf')
+      ? 'application/pdf'
+      : 'text/plain';
+  const response = await fetch(new URL('/api/context-documents', connection.baseUrl), {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${connection.token}`,
+      'content-type': contentType,
+      'x-sermon-notes-filename': encodeURIComponent(file.name),
+    },
+    body: file,
+  });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => ({}))) as { error?: string };
+    throw new Error(body.error ?? `${response.status} ${response.statusText}`);
+  }
+  return (await response.json()) as ContextDocument;
+}
+
 export const api = {
   preflight: (connection: OperatorConnection) =>
     request<Record<string, unknown>>(connection, '/api/preflight'),
@@ -114,6 +139,9 @@ export const api = {
     }),
   deleteArchive: (connection: OperatorConnection, sessionId: string) =>
     request<void>(connection, `/api/archives/${sessionId}`, { method: 'DELETE' }),
+  contextDocuments: (connection: OperatorConnection) =>
+    request<ContextDocument[]>(connection, '/api/context-documents'),
+  uploadContextDocument,
   voiceProfiles: (connection: OperatorConnection) =>
     request<VoiceProfile[]>(connection, '/api/voice-profiles'),
   createVoiceProfile: (connection: OperatorConnection, body: unknown) =>

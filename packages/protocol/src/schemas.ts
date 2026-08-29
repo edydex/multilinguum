@@ -46,6 +46,7 @@ export const createSessionSchema = z.object({
     recordSource: z.boolean(),
     recordTranslations: z.boolean(),
   }),
+  contextDocumentIds: z.array(z.string().uuid()).max(8).default([]),
   expectedDurationMinutes: z.number().positive().max(480).default(120),
   budgetWarningUsd: z.number().positive().default(20),
 });

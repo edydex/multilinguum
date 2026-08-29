@@ -215,4 +215,30 @@ describe('processor vertical slice', () => {
     const response = await server.inject({ method: 'GET', url: '/api/public/token' });
     expect(response.statusCode).toBe(404);
   });
+
+  it('accepts private sermon notes and locks the selected context into the session', async () => {
+    const server = await testServer();
+    const uploaded = await server.inject({
+      method: 'POST',
+      url: '/api/context-documents',
+      headers: {
+        authorization: `Bearer ${controlToken}`,
+        'content-type': 'text/plain',
+        'x-sermon-notes-filename': encodeURIComponent('Sunday Notes.txt'),
+      },
+      payload:
+        'Ефесянам 4:3 — сохранять единство Духа. Ephesians 4:3 — preserve the unity of the Spirit.',
+    });
+    expect(uploaded.statusCode).toBe(201);
+    expect(uploaded.json().filename).toBe('Sunday Notes.txt');
+
+    const created = await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: { ...sessionRequest(), contextDocumentIds: [uploaded.json().id] },
+    });
+    expect(created.statusCode).toBe(200);
+    expect(created.json().contextDocumentIds).toEqual([uploaded.json().id]);
+  });
 });

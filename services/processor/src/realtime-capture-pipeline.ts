@@ -25,6 +25,13 @@ interface CapturePoint {
   capturedAtUnixMs: number;
 }
 
+interface CascadeBuffer {
+  segment: TranscriptSegment;
+  timing: Parameters<SessionEngine['ingestLiveTranscript']>[1];
+}
+
+const expressiveMaximumWindowMs = 4_500;
+
 export type RealtimeTranslationChannelFactory = () => RealtimeTranslationChannel;
 
 export class RealtimeCapturePipeline {
@@ -44,6 +51,8 @@ export class RealtimeCapturePipeline {
   #frameSequence = 0;
   #sourceSequence = 0;
   #latestCapturedAtUnixMs = 0;
+  #cascadeBuffer: CascadeBuffer | undefined;
+  #cascadeSequence = 0;
   #inputChain = Promise.resolve();
   #sourceTranscriptChain = Promise.resolve();
   #cascadeTranscriptChain = Promise.resolve();
@@ -146,8 +155,9 @@ export class RealtimeCapturePipeline {
     await this.#inputChain;
     await this.#flushPendingSource();
     await Promise.allSettled([...this.#channels.values()].map((channel) => channel.stop()));
-    for (const channelId of this.#transcriptBuffers.keys()) this.#flushTranscript(channelId);
     await this.#transcriber.stop();
+    for (const channelId of this.#transcriptBuffers.keys()) this.#flushTranscript(channelId);
+    this.#flushCascadeTranscript();
     await Promise.all([
       this.#sourceTranscriptChain,
       this.#cascadeTranscriptChain,
@@ -235,6 +245,48 @@ export class RealtimeCapturePipeline {
           error instanceof Error ? error : new Error(String(error)),
         );
       });
+    this.#bufferCascadeTranscript(segment, timing);
+  }
+
+  #bufferCascadeTranscript(
+    segment: TranscriptSegment,
+    timing: Parameters<SessionEngine['ingestLiveTranscript']>[1],
+  ): void {
+    const hasCascadeChannel = this.#session.targets.some(
+      (channel) => channel.voiceMode !== 'source' && !this.#activeDirectChannelIds.has(channel.id),
+    );
+    if (!hasCascadeChannel) return;
+    const existing = this.#cascadeBuffer?.segment;
+    this.#cascadeBuffer = {
+      segment: existing
+        ? {
+            ...existing,
+            text: `${existing.text.trim()} ${segment.text.trim()}`,
+            sourceEndMs: Math.max(existing.sourceEndMs, segment.sourceEndMs),
+            emittedAt: segment.emittedAt,
+            final: true,
+          }
+        : {
+            ...segment,
+            sequence: this.#cascadeSequence,
+          },
+      timing,
+    };
+    const buffered = this.#cascadeBuffer.segment;
+    const sentenceEnded = /[.!?…]["'»”)]*\s*$/u.test(buffered.text);
+    if (
+      sentenceEnded ||
+      buffered.sourceEndMs - buffered.sourceStartMs >= expressiveMaximumWindowMs
+    ) {
+      this.#flushCascadeTranscript();
+    }
+  }
+
+  #flushCascadeTranscript(): void {
+    const buffered = this.#cascadeBuffer;
+    if (!buffered) return;
+    this.#cascadeBuffer = undefined;
+    this.#cascadeSequence += 1;
     const cascadeChannelIds = new Set(
       this.#session.targets
         .filter(
@@ -247,8 +299,8 @@ export class RealtimeCapturePipeline {
     this.#cascadeTranscriptChain = this.#cascadeTranscriptChain
       .then(async () => {
         await this.#engine.ingestLiveTranscript(
-          segment,
-          timing,
+          buffered.segment,
+          buffered.timing,
           this.#activeDirectChannelIds,
           cascadeChannelIds,
         );

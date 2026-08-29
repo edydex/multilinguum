@@ -19,12 +19,14 @@ import type {
 import { createSessionSchema, estimateCloudServiceCost } from '@multilinguum/protocol';
 import { defaultGlossary } from './glossary.js';
 import { buildLatencyBreakdown, summarizeLatency } from './latency.js';
+import type { SermonContextStore } from './context-store.js';
 import type { VoiceProfileStore } from './voice-profile-store.js';
 
 export interface SessionEngineDependencies {
   archive: ArchiveStore;
   relay: MediaRelay;
   profiles: VoiceProfileStore;
+  context: SermonContextStore;
   deterministicTranslation: TranslationProvider;
   cloudTranslation?: TranslationProvider;
   deterministicSpeech: SpeechRenderer;
@@ -76,6 +78,7 @@ export class SessionEngine {
       throw new Error('Only one church service can be active at a time.');
     }
     const parsed = createSessionSchema.parse(input);
+    await this.#dependencies.context.require(parsed.contextDocumentIds);
     const targets: ChannelConfig[] = parsed.targets.map((target) => ({
       id: target.id,
       targetLanguage: target.targetLanguage,
@@ -118,6 +121,7 @@ export class SessionEngine {
       processingNode: parsed.processingNode,
       createdAt,
       relayRoom: `service-${id}`,
+      contextDocumentIds: parsed.contextDocumentIds,
       archivePolicy: parsed.archivePolicy,
       configurationLocked: false,
       budgetWarningUsd: parsed.budgetWarningUsd,
@@ -326,7 +330,7 @@ export class SessionEngine {
       throw new Error('Channel is not an active natural-voice Realtime channel.');
     }
     if (runtime.config.muted) return;
-    await this.#dependencies.archive.appendAudio(channelId, audio);
+    await this.#dependencies.archive.appendAudio(session.id, channelId, audio);
     await this.#dependencies.relay.publishAudio(channelId, audio);
     const expectedAt = Date.parse(session.startedAt ?? session.createdAt) + audio.startMs;
     const latencyMs = Math.max(0, Date.now() - expectedAt);
@@ -365,7 +369,7 @@ export class SessionEngine {
       language: input.language,
       renderer: 'delayed-original',
     };
-    await this.#dependencies.archive.appendAudio(sourceChannel.config.id, audio);
+    await this.#dependencies.archive.appendAudio(session.id, sourceChannel.config.id, audio);
     const publishStartedAtUnixMs = Date.now();
     await this.#dependencies.relay.publishAudio(sourceChannel.config.id, audio);
     const publishCompletedAtUnixMs = Date.now();
@@ -462,6 +466,10 @@ export class SessionEngine {
             targetLanguage: runtime.config.targetLanguage,
             glossary: defaultGlossary[runtime.config.targetLanguage],
             precedingText: runtime.precedingText,
+            sermonNotes: await this.#dependencies.context.retrieve(
+              session.contextDocumentIds,
+              source.text,
+            ),
           });
         } finally {
           translation = {
@@ -502,7 +510,7 @@ export class SessionEngine {
           };
         }
         speechRenderer = rendered.renderer;
-        await this.#dependencies.archive.appendAudio(runtime.config.id, rendered);
+        await this.#dependencies.archive.appendAudio(session.id, runtime.config.id, rendered);
         const audioStartedAtUnixMs = Date.now();
         await this.#dependencies.relay.publishAudio(runtime.config.id, rendered);
         audioPublish = {

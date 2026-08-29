@@ -26,6 +26,7 @@ import { VoiceProfileStore } from './voice-profile-store.js';
 import { OpenAILiveTranscriber } from './providers/openai-live-transcriber.js';
 import { OpenAIRealtimeTranslationChannel } from './providers/openai-realtime-translation.js';
 import { RealtimeCapturePipeline } from './realtime-capture-pipeline.js';
+import { SermonContextStore } from './context-store.js';
 
 const replaySchema = z.object({
   segments: z.array(transcriptInputSchema).min(1).max(10_000),
@@ -90,6 +91,11 @@ export async function buildServer(config: ProcessorConfig) {
     { parseAs: 'buffer', bodyLimit: 25 * 1024 * 1024 },
     (_request, body, done) => done(null, body),
   );
+  app.addContentTypeParser(
+    'application/pdf',
+    { parseAs: 'buffer', bodyLimit: 10 * 1024 * 1024 },
+    (_request, body, done) => done(null, body),
+  );
   await app.register(cors, {
     origin:
       config.NODE_ENV === 'production'
@@ -116,6 +122,7 @@ export async function buildServer(config: ProcessorConfig) {
   };
 
   const archive = new FileArchiveStore(config.ARCHIVE_ROOT, config.ARCHIVE_RETENTION_DAYS);
+  const context = new SermonContextStore(config.ARCHIVE_ROOT);
   const profiles = new VoiceProfileStore(config.ARCHIVE_ROOT);
   const deterministicTranslation = new DeterministicTranslationProvider();
   const deterministicSpeech = new DeterministicSpeechRenderer();
@@ -146,6 +153,7 @@ export async function buildServer(config: ProcessorConfig) {
       : new BroadcastMediaRelay(broadcast);
   const engine = new SessionEngine({
     archive,
+    context,
     relay,
     profiles,
     deterministicTranslation,
@@ -267,7 +275,12 @@ export async function buildServer(config: ProcessorConfig) {
     socket.on('close', () => operatorSockets.delete(socket));
   });
 
-  let captureActive = false;
+  let activeCapture:
+    | {
+        socket: WebSocket;
+        close: () => Promise<void>;
+      }
+    | undefined;
   app.get('/api/capture/audio', { websocket: true }, (socket, request) => {
     const query = request.query as { sessionId?: string };
     const supplied = Buffer.from(webSocketControlToken(request));
@@ -294,11 +307,10 @@ export async function buildServer(config: ProcessorConfig) {
       socket.close(1013, 'OpenAI Realtime processing is not configured');
       return;
     }
-    if (captureActive) {
+    if (activeCapture) {
       socket.close(1013, 'Another capture console is already streaming');
       return;
     }
-    captureActive = true;
     const pipeline = new RealtimeCapturePipeline(
       engine,
       session,
@@ -306,8 +318,21 @@ export async function buildServer(config: ProcessorConfig) {
       realtimeTranslationFactory,
     );
     const ready = pipeline.start();
+    let acceptingFrames = true;
+    let closePromise: Promise<void> | undefined;
+    const closePipeline = () => {
+      acceptingFrames = false;
+      closePromise ??= ready
+        .then(() => pipeline.close())
+        .finally(() => {
+          if (activeCapture?.socket === socket) activeCapture = undefined;
+        });
+      return closePromise;
+    };
+    activeCapture = { socket, close: closePipeline };
     socket.on('message', (message, isBinary) => {
       try {
+        if (!acceptingFrames) return;
         if (!isBinary) throw new Error('Capture frames must be binary.');
         const packet = Buffer.isBuffer(message) ? message : Buffer.from(message as ArrayBuffer);
         if (packet.byteLength < 16) throw new Error('Capture frame header is incomplete.');
@@ -333,8 +358,7 @@ export async function buildServer(config: ProcessorConfig) {
       }
     });
     socket.on('close', () => {
-      captureActive = false;
-      void ready.then(() => pipeline.close()).catch((error) => app.log.error(error));
+      void closePipeline().catch((error) => app.log.error(error));
     });
   });
 
@@ -348,7 +372,17 @@ export async function buildServer(config: ProcessorConfig) {
   app.post('/api/sessions/current/start', { preHandler: requireControl }, async () =>
     engine.start(),
   );
-  app.post('/api/sessions/current/stop', { preHandler: requireControl }, async () => engine.stop());
+  app.post('/api/sessions/current/stop', { preHandler: requireControl }, async () => {
+    const capture = activeCapture;
+    if (capture) {
+      const draining = capture.close();
+      if (capture.socket.readyState === capture.socket.OPEN) {
+        capture.socket.close(1000, 'Service stopping');
+      }
+      await draining;
+    }
+    return engine.stop();
+  });
   app.post('/api/sessions/current/replay', { preHandler: requireControl }, async (request) => {
     const replay = replaySchema.parse(request.body);
     const translated = [];
@@ -422,6 +456,30 @@ export async function buildServer(config: ProcessorConfig) {
     const { sessionId } = request.params as { sessionId: string };
     await archive.delete(sessionId);
     return reply.code(204).send();
+  });
+
+  app.get('/api/context-documents', { preHandler: requireControl }, async () => context.list());
+  app.post('/api/context-documents', { preHandler: requireControl }, async (request, reply) => {
+    const encodedFilename = request.headers['x-sermon-notes-filename'];
+    if (typeof encodedFilename !== 'string') {
+      return reply.code(400).send({ error: 'The sermon-note filename is required.' });
+    }
+    let filename: string;
+    try {
+      filename = decodeURIComponent(encodedFilename);
+    } catch {
+      return reply.code(400).send({ error: 'The sermon-note filename is invalid.' });
+    }
+    const contentType = request.headers['content-type']?.split(';', 1)[0];
+    if (contentType !== 'application/pdf' && contentType !== 'text/plain') {
+      return reply.code(415).send({ error: 'Upload sermon notes as PDF or plain text.' });
+    }
+    const body =
+      typeof request.body === 'string' ? Buffer.from(request.body, 'utf8') : request.body;
+    if (!Buffer.isBuffer(body)) {
+      return reply.code(400).send({ error: 'A non-empty sermon-note file is required.' });
+    }
+    return reply.code(201).send(await context.create(filename, contentType, body));
   });
 
   app.get('/api/voice-profiles', { preHandler: requireControl }, async () => profiles.list());

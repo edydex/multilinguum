@@ -120,6 +120,7 @@ function liveSession(): ServiceSession {
     createdAt: new Date().toISOString(),
     startedAt: new Date().toISOString(),
     relayRoom: 'service-live-test',
+    contextDocumentIds: [],
     archivePolicy: {
       retentionDays: 30,
       retainIndefinitely: false,
@@ -129,6 +130,18 @@ function liveSession(): ServiceSession {
     configurationLocked: true,
     budgetWarningUsd: 20,
     estimatedCostUsd: 1,
+  };
+}
+
+function cascadeSession(): ServiceSession {
+  const session = liveSession();
+  return {
+    ...session,
+    targets: session.targets.map((channel) =>
+      channel.id === 'channel-en'
+        ? { ...channel, translationProvider: 'openai-cascade' as const }
+        : channel,
+    ),
   };
 }
 
@@ -224,5 +237,59 @@ describe('RealtimeCapturePipeline', () => {
       ],
     ]);
     expect(translatedAudio).toHaveLength(1);
+  });
+
+  it('keeps source captions immediate but joins expressive translation into a full sentence', async () => {
+    const calls: unknown[][] = [];
+    const engine = {
+      ingestSourceAudio: async () => undefined,
+      ingestLiveTranscript: async (...input: unknown[]) => {
+        calls.push(input);
+        return [];
+      },
+      reportChannelFailure: () => undefined,
+    } as unknown as SessionEngine;
+    const transcriber = new FakeTranscriber();
+    const pipeline = new RealtimeCapturePipeline(
+      engine,
+      cascadeSession(),
+      transcriber,
+      () => new FakeTranslationChannel(),
+    );
+    await pipeline.start();
+    const base = {
+      id: 'source-part',
+      sessionId: 'session-live-test',
+      channelId: 'source-ru',
+      language: 'ru' as const,
+      emittedAt: new Date().toISOString(),
+      final: true,
+    };
+    transcriber.emit({
+      ...base,
+      text: 'Поэтому мы должны помнить,',
+      sourceStartMs: 0,
+      sourceEndMs: 2_250,
+      sequence: 0,
+    });
+    transcriber.emit({
+      ...base,
+      id: 'source-part-2',
+      text: 'что Христос есть наш мир.',
+      sourceStartMs: 2_250,
+      sourceEndMs: 4_500,
+      sequence: 1,
+    });
+    await pipeline.close();
+
+    const cascadeCall = calls.find((call) => (call[3] as Set<string>).has('channel-en'));
+    expect(cascadeCall?.[0]).toEqual(
+      expect.objectContaining({
+        text: 'Поэтому мы должны помнить, что Христос есть наш мир.',
+        sourceStartMs: 0,
+        sourceEndMs: 4_500,
+      }),
+    );
+    expect(calls.filter((call) => (call[3] as Set<string>).has('channel-ru'))).toHaveLength(2);
   });
 });

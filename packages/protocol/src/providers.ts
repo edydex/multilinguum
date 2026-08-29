@@ -27,6 +27,7 @@ export interface TranslationContext {
   targetLanguage: Language;
   glossary: Readonly<Record<string, string>>;
   precedingText: string[];
+  sermonNotes?: string[];
 }
 
 export interface Transcriber {
@@ -87,7 +88,7 @@ export interface MediaRelay {
 export interface ArchiveStore {
   create(session: ServiceSession, engineVersions: Record<string, string>): Promise<ArchiveManifest>;
   appendTranscript(segment: TranscriptSegment): Promise<void>;
-  appendAudio(channelId: string, chunk: RenderedSpeech): Promise<void>;
+  appendAudio(sessionId: string, channelId: string, chunk: RenderedSpeech): Promise<void>;
   appendLatency(sample: PipelineLatencySample): Promise<void>;
   finalize(sessionId: string): Promise<ArchiveManifest>;
   list(): Promise<ArchiveManifest[]>;

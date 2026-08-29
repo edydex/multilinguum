@@ -4,6 +4,7 @@ import type {
   ArchiveManifest,
   ChannelConfig,
   ChannelHealth,
+  ContextDocument,
   Language,
   ProcessorEvent,
   ServiceSession,
@@ -91,6 +92,17 @@ export function App() {
   const [captions, setCaptions] = useState<Record<string, TranscriptSegment>>({});
   const [archives, setArchives] = useState<ArchiveManifest[]>([]);
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([]);
+  const [contextDocuments, setContextDocuments] = useState<ContextDocument[]>([]);
+  const [selectedContextIds, setSelectedContextIds] = useState<string[]>(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem('sermonContextIds') ?? '[]') as unknown;
+      return Array.isArray(stored)
+        ? stored.filter((value): value is string => typeof value === 'string')
+        : [];
+    } catch {
+      return [];
+    }
+  });
   const [addingVoice, setAddingVoice] = useState(false);
   const [voiceDraft, setVoiceDraft] = useState<VoiceProfileDraft>(newVoiceProfileDraft);
   const [preflight, setPreflight] = useState<Record<string, unknown>>();
@@ -156,17 +168,20 @@ export function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const [current, nextPreflight, nextArchives, nextVoiceProfiles] = await Promise.all([
-        api.current(connection),
-        api.preflight(connection),
-        api.archives(connection),
-        api.voiceProfiles(connection),
-      ]);
+      const [current, nextPreflight, nextArchives, nextVoiceProfiles, nextContextDocuments] =
+        await Promise.all([
+          api.current(connection),
+          api.preflight(connection),
+          api.archives(connection),
+          api.voiceProfiles(connection),
+          api.contextDocuments(connection),
+        ]);
       setSession(current.session);
       setHealth(Object.fromEntries(current.health.map((item) => [item.channelId, item])));
       setPreflight(nextPreflight);
       setArchives(nextArchives);
       setVoiceProfiles(nextVoiceProfiles);
+      setContextDocuments(nextContextDocuments);
       setError(undefined);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -180,7 +195,12 @@ export function App() {
     return subscribe(
       connection,
       (event: ProcessorEvent) => {
-        if (event.type === 'session') setSession(event.session);
+        if (event.type === 'session') {
+          setSession(event.session);
+          if (event.session.state === 'starting' || event.session.state === 'live') {
+            setError(undefined);
+          }
+        }
         if (event.type === 'health') {
           setHealth((current) => ({ ...current, [event.health.channelId]: event.health }));
         }
@@ -197,6 +217,10 @@ export function App() {
     if (selectedDeviceId) localStorage.setItem('audioDeviceId', selectedDeviceId);
     else localStorage.removeItem('audioDeviceId');
   }, [selectedDeviceId]);
+
+  useEffect(() => {
+    localStorage.setItem('sermonContextIds', JSON.stringify(selectedContextIds));
+  }, [selectedContextIds]);
 
   useEffect(
     () => () => {
@@ -306,10 +330,37 @@ export function App() {
           recordSource: true,
           recordTranslations: true,
         },
+        contextDocumentIds: selectedContextIds,
         expectedDurationMinutes: 120,
         budgetWarningUsd: 20,
       });
       setSession(await api.start(connection));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const uploadContextDocuments = async (files: FileList | null) => {
+    if (!files?.length) return;
+    setBusy(true);
+    setError(undefined);
+    try {
+      const uploaded: ContextDocument[] = [];
+      for (const file of [...files]) {
+        if (file.size > 10 * 1024 * 1024) {
+          throw new Error(`${file.name} is larger than the 10 MB sermon-note limit.`);
+        }
+        uploaded.push(await api.uploadContextDocument(connection, file));
+      }
+      setContextDocuments((current) => [
+        ...uploaded,
+        ...current.filter((document) => !uploaded.some((item) => item.id === document.id)),
+      ]);
+      setSelectedContextIds((current) => [
+        ...new Set([...current, ...uploaded.map((document) => document.id)]),
+      ]);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -532,10 +583,73 @@ export function App() {
               </section>
             </div>
 
+            <section className="panel context-panel">
+              <div className="panel-title">
+                <div>
+                  <p className="eyebrow">03 · CONTEXT</p>
+                  <h2>Sermon notes</h2>
+                </div>
+                <span className="lock">{live ? 'Locked' : 'Optional'}</span>
+              </div>
+              <div className="context-toolbar">
+                <label className={`upload-button ${live || busy ? 'disabled' : ''}`}>
+                  Upload Sermon Notes for Context
+                  <input
+                    type="file"
+                    accept="application/pdf,text/plain,.pdf,.txt"
+                    multiple
+                    disabled={live || busy}
+                    onChange={(event) => {
+                      void uploadContextDocuments(event.target.files);
+                      event.currentTarget.value = '';
+                    }}
+                  />
+                </label>
+                <p className="field-note">
+                  PDF or text, up to 10 MB each. Relevant passages guide names, Scripture wording,
+                  and the intended thought; the model is told never to add notes that were not
+                  spoken.
+                </p>
+              </div>
+              {contextDocuments.length === 0 ? (
+                <p className="hint">No sermon notes uploaded for the next service.</p>
+              ) : (
+                <div className="context-documents">
+                  {contextDocuments.map((document) => {
+                    const checked = (
+                      live && session ? (session.contextDocumentIds ?? []) : selectedContextIds
+                    ).includes(document.id);
+                    return (
+                      <label className="context-document" key={document.id}>
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          disabled={live}
+                          onChange={(event) =>
+                            setSelectedContextIds((current) =>
+                              event.target.checked
+                                ? [...new Set([...current, document.id])]
+                                : current.filter((id) => id !== document.id),
+                            )
+                          }
+                        />
+                        <span>
+                          <strong>{document.filename}</strong>
+                          <small>
+                            {document.characterCount.toLocaleString()} extracted characters
+                          </small>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+
             <section className="panel channels-panel">
               <div className="panel-title">
                 <div>
-                  <p className="eyebrow">03 · CHANNELS</p>
+                  <p className="eyebrow">04 · CHANNELS</p>
                   <h2>Listener languages</h2>
                 </div>
                 <span>
@@ -659,7 +773,7 @@ export function App() {
                             : draft.outputMode === 'generic-fast'
                               ? 'Lowest delay. Speaks while the translation is arriving, with less reliable clause-level cadence.'
                               : draft.outputMode === 'generic-expressive'
-                                ? 'Recommended. Waits for a glossary-checked clause, then uses warmer, more deliberate narration.'
+                                ? 'Recommended. Waits for a complete sentence or a bounded 4.5-second clause, then narrates the thought as one connected phrase.'
                                 : `${selectedProfile?.displayName ?? 'Cloned'} voice identity with finalized-clause cadence; automatically falls back if its backlog exceeds 10 seconds.`}
                         </span>
                       </label>

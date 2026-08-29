@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import { appendFile, mkdir, readFile, rename, rm, stat, unlink, writeFile } from 'node:fs/promises';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type {
@@ -118,14 +118,21 @@ export class FileArchiveStore implements ArchiveStore {
     await appendFile(transcriptPath, `${JSON.stringify(segment)}\n`, { mode: 0o600 });
   }
 
-  async appendAudio(channelId: string, chunk: RenderedSpeech): Promise<void> {
+  async appendAudio(sessionId: string, channelId: string, chunk: RenderedSpeech): Promise<void> {
+    assertSafeId(sessionId);
     assertSafeId(channelId);
     if (chunk.encoding !== 'pcm_s16le' || chunk.sampleRate !== 48000) {
       throw new Error('Archive audio must be 48 kHz signed 16-bit PCM before Opus finalization.');
     }
-    const sessionId = this.#sessionForActiveChannel(channelId);
-    if (!sessionId) {
-      throw new Error(`No active archive owns channel ${channelId}.`);
+    const manifest = await this.#readManifest(sessionId);
+    const row = this.#database
+      .prepare('SELECT completed_at FROM archives WHERE session_id = ?')
+      .get(sessionId) as { completed_at: string | null } | undefined;
+    if (!row || row.completed_at) {
+      throw new Error(`Archive ${sessionId} is not active.`);
+    }
+    if (!manifest.audioTracks.some((track) => track.channelId === channelId)) {
+      throw new Error(`Archive ${sessionId} does not own channel ${channelId}.`);
     }
     await appendFile(
       path.join(this.#sessionRoot(sessionId), 'audio', `${channelId}.pcm`),
@@ -345,23 +352,6 @@ export class FileArchiveStore implements ArchiveStore {
       }
       throw error;
     }
-  }
-
-  #sessionForActiveChannel(channelId: string): string | undefined {
-    const rows = this.#database
-      .prepare('SELECT session_id, manifest_path FROM archives WHERE completed_at IS NULL')
-      .all() as Array<{ session_id: string; manifest_path: string }>;
-    for (const row of rows) {
-      try {
-        const manifest = JSON.parse(readFileSync(row.manifest_path, 'utf8')) as ArchiveManifest;
-        if (manifest.audioTracks.some((track) => track.channelId === channelId)) {
-          return row.session_id;
-        }
-      } catch {
-        continue;
-      }
-    }
-    return undefined;
   }
 
   #sessionRoot(sessionId: string): string {

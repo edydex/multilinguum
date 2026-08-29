@@ -31,6 +31,15 @@ export interface ChannelConfig {
   muted: boolean;
 }
 
+export interface ContextDocument {
+  id: string;
+  filename: string;
+  contentType: 'application/pdf' | 'text/plain';
+  sha256: string;
+  uploadedAt: string;
+  characterCount: number;
+}
+
 export interface ServiceSession {
   id: string;
   state: SessionState;
@@ -41,6 +50,7 @@ export interface ServiceSession {
   startedAt?: string;
   stoppedAt?: string;
   relayRoom?: string;
+  contextDocumentIds: string[];
   archivePolicy: ArchivePolicy;
   configurationLocked: boolean;
   budgetWarningUsd: number;

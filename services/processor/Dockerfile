@@ -18,7 +18,7 @@ RUN pnpm --filter @multilinguum/protocol build \
 FROM node:24-bookworm-slim
 ENV NODE_ENV=production
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates ffmpeg \
+    && apt-get install -y --no-install-recommends ca-certificates ffmpeg poppler-utils \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home multilinguum \
     && mkdir -p /var/lib/multilinguum/archives \
