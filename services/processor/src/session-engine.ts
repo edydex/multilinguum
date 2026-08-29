@@ -8,6 +8,7 @@ import type {
   LatencySpan,
   PipelineLatencySample,
   ProcessorEvent,
+  RenderedSpeech,
   ServiceSession,
   SpeechRenderer,
   SourceProcessingTiming,
@@ -29,6 +30,8 @@ export interface SessionEngineDependencies {
   deterministicSpeech: SpeechRenderer;
   naturalSpeech?: SpeechRenderer;
   clonedSpeech?: SpeechRenderer;
+  realtimeTranslationEngine?: string;
+  liveTranscriptionEngine?: string;
   broadcast: (event: ProcessorEvent) => void;
 }
 
@@ -75,6 +78,10 @@ export class SessionEngine {
     const targetLanguages = targets.map((target) => target.targetLanguage);
     if (new Set(targetLanguages).size !== targetLanguages.length) {
       throw new Error('Each target language may appear only once.');
+    }
+    const sourceChannels = targets.filter((target) => target.voiceMode === 'source');
+    if (sourceChannels.length !== 1) {
+      throw new Error('A service requires exactly one delayed source-language channel.');
     }
     for (const channel of targets) {
       if (channel.voiceMode === 'source' && channel.targetLanguage !== parsed.sourceLanguage) {
@@ -148,7 +155,10 @@ export class SessionEngine {
     this.#emitSession();
     await this.#dependencies.archive.create(startingSession, {
       processor: '0.1.0',
-      translation: this.#translationProvider().name,
+      transcription: this.#dependencies.liveTranscriptionEngine ?? 'not-configured',
+      translation: [
+        ...new Set(startingSession.targets.map((target) => this.#translationEngine(target))),
+      ].join(','),
       naturalSpeech: this.#naturalRenderer().name,
       clonedSpeech: this.#dependencies.clonedSpeech?.name ?? 'not-configured',
     });
@@ -191,14 +201,132 @@ export class SessionEngine {
       final: input.final,
       sequence: input.sequence,
     };
-    const sourceAudioSpan = this.#sourceAudioSpans.get(input.sequence);
-    const results = await Promise.all(
-      [...this.#channels.values()].map((channel) =>
-        this.#processChannel(source, channel, input.timing, sourceAudioSpan),
-      ),
+    return this.#processSourceTranscript(source, input.timing, () => true, input.sequence);
+  }
+
+  async ingestLiveTranscript(
+    source: TranscriptSegment,
+    timing?: SourceProcessingTiming,
+    directChannelIds: ReadonlySet<string> = new Set(),
+  ): Promise<TranscriptSegment[]> {
+    const session = this.#requiredSession();
+    if (session.state !== 'live') throw new Error('Session is not live.');
+    const normalized: TranscriptSegment = {
+      ...source,
+      sessionId: session.id,
+      channelId: `source-${session.sourceLanguage}`,
+      language: session.sourceLanguage,
+    };
+    return this.#processSourceTranscript(
+      normalized,
+      timing,
+      (runtime) => {
+        if (runtime.config.voiceMode === 'source') return true;
+        if (runtime.config.voiceMode === 'cloned') return true;
+        return !directChannelIds.has(runtime.config.id);
+      },
+      undefined,
     );
-    this.#sourceAudioSpans.delete(input.sequence);
-    return results.filter((segment): segment is TranscriptSegment => Boolean(segment));
+  }
+
+  reportChannelFailure(channelId: string, error: Error, fallbackEngine?: string): void {
+    const runtime = this.#requiredChannel(channelId);
+    runtime.health = {
+      ...runtime.health,
+      state: fallbackEngine ? 'degraded' : 'failed',
+      engine: fallbackEngine ?? runtime.health.engine,
+      error: error.message,
+    };
+    this.#emitHealth(runtime);
+    this.#dependencies.broadcast({ type: 'error', scope: channelId, message: error.message });
+  }
+
+  async ingestRealtimeTranscript(
+    channelId: string,
+    input: {
+      text: string;
+      sourceStartMs: number;
+      sourceEndMs: number;
+      sequence: number;
+      firstDeltaAtUnixMs: number;
+    },
+  ): Promise<TranscriptSegment> {
+    const session = this.#requiredSession();
+    if (session.state !== 'live') throw new Error('Session is not live.');
+    const runtime = this.#requiredChannel(channelId);
+    if (
+      runtime.config.translationProvider !== 'openai-realtime' ||
+      runtime.config.voiceMode !== 'natural'
+    ) {
+      throw new Error('Channel is not an active natural-voice Realtime channel.');
+    }
+    const segment: TranscriptSegment = {
+      id: randomUUID(),
+      sessionId: session.id,
+      channelId,
+      language: runtime.config.targetLanguage,
+      text: input.text,
+      sourceStartMs: input.sourceStartMs,
+      sourceEndMs: input.sourceEndMs,
+      emittedAt: new Date().toISOString(),
+      final: true,
+      sequence: input.sequence,
+    };
+    await this.#dependencies.archive.appendTranscript(segment);
+    const captionStartedAtUnixMs = Date.now();
+    await this.#dependencies.relay.publishCaption(segment);
+    const captionCompletedAtUnixMs = Date.now();
+    const sample = this.#latencySample({
+      runtime,
+      source: segment,
+      captionPublish: {
+        startedAtUnixMs: captionStartedAtUnixMs,
+        firstDeltaAtUnixMs: input.firstDeltaAtUnixMs,
+        completedAtUnixMs: captionCompletedAtUnixMs,
+      },
+      translationEngine: 'openai-realtime-translate',
+      outcome: 'complete',
+    });
+    await this.#recordLatency(runtime, sample);
+    const latencyMs = Math.max(0, sample.metrics.sourceEndToCaptionMs ?? 0);
+    const now = new Date().toISOString();
+    runtime.health = {
+      ...runtime.health,
+      state: 'healthy',
+      lastTranscriptAt: now,
+      latencyMs,
+      backlogMs: latencyMs,
+      engine: 'openai-realtime-translate+natural',
+      latency: summarizeLatency(runtime.latencySamples),
+    };
+    this.#emitHealth(runtime);
+    return segment;
+  }
+
+  async ingestRealtimeAudio(channelId: string, audio: RenderedSpeech): Promise<void> {
+    const session = this.#requiredSession();
+    if (session.state !== 'live') throw new Error('Session is not live.');
+    const runtime = this.#requiredChannel(channelId);
+    if (
+      runtime.config.translationProvider !== 'openai-realtime' ||
+      runtime.config.voiceMode !== 'natural'
+    ) {
+      throw new Error('Channel is not an active natural-voice Realtime channel.');
+    }
+    if (runtime.config.muted) return;
+    await this.#dependencies.archive.appendAudio(channelId, audio);
+    await this.#dependencies.relay.publishAudio(channelId, audio);
+    const expectedAt = Date.parse(session.startedAt ?? session.createdAt) + audio.startMs;
+    const latencyMs = Math.max(0, Date.now() - expectedAt);
+    runtime.health = {
+      ...runtime.health,
+      state: 'healthy',
+      lastAudioAt: new Date().toISOString(),
+      latencyMs,
+      backlogMs: latencyMs,
+      engine: `${audio.renderer}+natural`,
+    };
+    this.#emitHealth(runtime);
   }
 
   async ingestSourceAudio(input: {
@@ -441,6 +569,25 @@ export class SessionEngine {
     }
   }
 
+  async #processSourceTranscript(
+    source: TranscriptSegment,
+    timing: SourceProcessingTiming | undefined,
+    include: (runtime: RuntimeChannel) => boolean,
+    sourceAudioSequence: number | undefined,
+  ): Promise<TranscriptSegment[]> {
+    const sourceAudioSpan =
+      sourceAudioSequence === undefined
+        ? undefined
+        : this.#sourceAudioSpans.get(sourceAudioSequence);
+    const results = await Promise.all(
+      [...this.#channels.values()]
+        .filter(include)
+        .map((channel) => this.#processChannel(source, channel, timing, sourceAudioSpan)),
+    );
+    if (sourceAudioSequence !== undefined) this.#sourceAudioSpans.delete(sourceAudioSequence);
+    return results.filter((segment): segment is TranscriptSegment => Boolean(segment));
+  }
+
   async #render(runtime: RuntimeChannel, segment: TranscriptSegment) {
     if (runtime.effectiveVoiceMode === 'cloned') {
       if (!this.#dependencies.clonedSpeech) throw new Error('Cloned renderer is not configured.');
@@ -459,6 +606,7 @@ export class SessionEngine {
     captionPublish?: LatencySpan | undefined;
     audioPublish?: LatencySpan | undefined;
     speechRenderer?: string | undefined;
+    translationEngine?: string | undefined;
     outcome: 'complete' | 'failed';
     error?: string | undefined;
   }): PipelineLatencySample {
@@ -489,7 +637,10 @@ export class SessionEngine {
           ? { transcription: input.sourceTiming.transcriptionEngine ?? 'capture-transcriber' }
           : {}),
         ...(input.runtime.config.voiceMode !== 'source'
-          ? { translation: this.#translationProvider(input.runtime.config).name }
+          ? {
+              translation:
+                input.translationEngine ?? this.#translationProvider(input.runtime.config).name,
+            }
           : {}),
         ...(input.speechRenderer ? { speechRenderer: input.speechRenderer } : {}),
         relay: this.#dependencies.relay.name,
@@ -512,6 +663,14 @@ export class SessionEngine {
       return this.#dependencies.deterministicTranslation;
     }
     return this.#dependencies.cloudTranslation ?? this.#dependencies.deterministicTranslation;
+  }
+
+  #translationEngine(config: ChannelConfig): string {
+    if (config.voiceMode === 'source') return 'delayed-original';
+    if (config.translationProvider === 'openai-realtime' && config.voiceMode === 'natural') {
+      return this.#dependencies.realtimeTranslationEngine ?? 'openai-realtime-not-configured';
+    }
+    return this.#translationProvider(config).name;
   }
 
   #naturalRenderer(): SpeechRenderer {

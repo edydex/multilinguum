@@ -19,6 +19,7 @@ This document distinguishes implemented code from claims that require external s
 - Per-segment capture, transcription, translation, voice, relay, and end-to-end timings are separated, summarized as latest/p50/p95, shown in the operator, and stored in an integrity-hashed JSONL report.
 - A paid synthetic RU to EN streaming benchmark exercised `gpt-live-transcribe` and `gpt-realtime-translate` concurrently with stage timing and retained audio/report evidence.
 - A glossary-aware `gpt-5.6-terra` benchmark corrected both meaning-sensitive errors observed in direct realtime output; its 117 input and 42 output tokens were verified in the dashboard as complimentary data-sharing incentive traffic with $0 model cost.
+- The live capture route now owns one shared GPT-Live-Transcribe session plus one GPT-Realtime-Translate session per active natural-voice target. Provider events are normalized behind shared contracts, 48 kHz capture is converted to 24 kHz API audio, returned PCM is converted back to the 48 kHz relay/archive format, and replay tests cover source VAD timing, transcript clauses, audio, and per-channel fallback isolation.
 
 ## Implemented but not externally verified
 
@@ -29,7 +30,7 @@ This document distinguishes implemented code from claims that require external s
 
 These paths still require real credentials, network services, or public ingress.
 
-The standalone paid benchmark harness is externally verified, but the production SessionEngine does not yet use the direct Realtime adapters. See [the 2026-08-29 benchmark report](benchmarks/2026-08-29-openai-ru-en.md) for measured timings, cost, retained hashes, and the direct translator's accuracy failure.
+The standalone paid benchmark harness is externally verified and its normalized adapters are wired into the production capture route. That integrated route has replay coverage but has not yet had its short paid live rehearsal, relay/browser playout measurement, or reconnect test. See [the 2026-08-29 benchmark report](benchmarks/2026-08-29-openai-ru-en.md) for measured timings, cost, retained hashes, and the direct translator's accuracy failure.
 
 ## Verified on the Linux/NVIDIA node
 
@@ -46,14 +47,13 @@ This closes the hardware installation and basic cloned-voice feasibility gate. I
 
 ## Still to implement
 
-- Direct GPT-Realtime-Translate channel adapter.
-- GPT-Live-Transcribe streaming source adapter.
 - Compatibility results for every RU/EN to EN/RU/ES/UK combination.
 - Automatic Piper Ukrainian fallback.
 - mDNS discovery, one-time pairing completion, client certificate issuance, and stored server fingerprint verification. The current pairing offer is explicitly marked bootstrap-only.
 - Voice-profile sample upload UI and processor-to-worker installation call.
 - Listener counts fed back from LiveKit into `ChannelHealth`.
-- Provider reconnect/resume logic for active Realtime sessions.
+- Provider reconnect/resume logic for active Realtime sessions; the current path isolates a failed direct channel and routes subsequent finalized source clauses through the cascade, but does not resume the failed socket.
+- Translation-audio silence trimming/pacing and listener-side capture-to-playout measurement. Raw provider `elapsed_ms` alignment is not an acceptance latency.
 - Local faster-whisper and TranslateGemma provider implementations.
 - Signed macOS packages and update distribution.
 

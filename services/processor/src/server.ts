@@ -23,8 +23,9 @@ import { VoiceWorkerSpeechRenderer } from './providers/voice-worker.js';
 import { LiveKitMediaRelay } from './providers/livekit-relay.js';
 import { SessionEngine } from './session-engine.js';
 import { VoiceProfileStore } from './voice-profile-store.js';
-import { CapturePipeline } from './capture-pipeline.js';
-import { OpenAIChunkTranscriber } from './providers/openai-chunk-transcriber.js';
+import { OpenAILiveTranscriber } from './providers/openai-live-transcriber.js';
+import { OpenAIRealtimeTranslationChannel } from './providers/openai-realtime-translation.js';
+import { RealtimeCapturePipeline } from './realtime-capture-pipeline.js';
 
 const replaySchema = z.object({
   segments: z.array(transcriptInputSchema).min(1).max(10_000),
@@ -104,8 +105,12 @@ export async function buildServer(config: ProcessorConfig) {
   const clonedSpeech = config.VOICE_WORKER_URL
     ? new VoiceWorkerSpeechRenderer(config.VOICE_WORKER_URL.toString(), config.VOICE_WORKER_TOKEN)
     : undefined;
-  const chunkTranscriber = config.OPENAI_API_KEY
-    ? new OpenAIChunkTranscriber(config.OPENAI_API_KEY, config.OPENAI_FILE_TRANSCRIBE_MODEL)
+  const realtimeTranscriberFactory = config.OPENAI_API_KEY
+    ? () => new OpenAILiveTranscriber(config.OPENAI_API_KEY!, config.OPENAI_TRANSCRIBE_MODEL)
+    : undefined;
+  const realtimeTranslationFactory = config.OPENAI_API_KEY
+    ? () =>
+        new OpenAIRealtimeTranslationChannel(config.OPENAI_API_KEY!, config.OPENAI_TRANSLATE_MODEL)
     : undefined;
   const relay =
     config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET
@@ -126,6 +131,12 @@ export async function buildServer(config: ProcessorConfig) {
     ...(cloudTranslation ? { cloudTranslation } : {}),
     ...(naturalSpeech ? { naturalSpeech } : {}),
     ...(clonedSpeech ? { clonedSpeech } : {}),
+    ...(config.OPENAI_API_KEY
+      ? {
+          realtimeTranslationEngine: `openai-realtime-translate:${config.OPENAI_TRANSLATE_MODEL}`,
+          liveTranscriptionEngine: `openai-live-transcribe:${config.OPENAI_TRANSCRIBE_MODEL}`,
+        }
+      : {}),
   });
 
   const requireControl = async (request: FastifyRequest, reply: FastifyReply) => {
@@ -249,8 +260,8 @@ export async function buildServer(config: ProcessorConfig) {
       socket.close(1008, 'Remote capture requires TLS');
       return;
     }
-    if (!chunkTranscriber) {
-      socket.close(1013, 'OpenAI transcription is not configured');
+    if (!realtimeTranscriberFactory || !realtimeTranslationFactory) {
+      socket.close(1013, 'OpenAI Realtime processing is not configured');
       return;
     }
     if (captureActive) {
@@ -258,7 +269,13 @@ export async function buildServer(config: ProcessorConfig) {
       return;
     }
     captureActive = true;
-    const pipeline = new CapturePipeline(engine, chunkTranscriber, session.sourceLanguage);
+    const pipeline = new RealtimeCapturePipeline(
+      engine,
+      session,
+      realtimeTranscriberFactory(),
+      realtimeTranslationFactory,
+    );
+    const ready = pipeline.start();
     socket.on('message', (message, isBinary) => {
       try {
         if (!isBinary) throw new Error('Capture frames must be binary.');
@@ -272,17 +289,22 @@ export async function buildServer(config: ProcessorConfig) {
         if (packet.byteLength !== 16 + sampleCount * 2 || sampleCount > 48_000) {
           throw new Error('Capture frame length is invalid.');
         }
-        pipeline.push(
-          new Uint8Array(packet.buffer, packet.byteOffset + 16, sampleCount * 2),
-          capturedAt,
-        );
+        const frame = new Uint8Array(packet.buffer, packet.byteOffset + 16, sampleCount * 2);
+        void ready
+          .then(() => pipeline.push(frame, capturedAt))
+          .catch((error) =>
+            socket.close(
+              1013,
+              error instanceof Error ? error.message : 'Realtime pipeline failed to start',
+            ),
+          );
       } catch (error) {
         socket.close(1003, error instanceof Error ? error.message : 'Invalid capture frame');
       }
     });
     socket.on('close', () => {
       captureActive = false;
-      void pipeline.close().catch((error) => app.log.error(error));
+      void ready.then(() => pipeline.close()).catch((error) => app.log.error(error));
     });
   });
 

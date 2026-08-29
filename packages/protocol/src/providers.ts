@@ -35,6 +35,26 @@ export interface Transcriber {
   pushAudio(chunk: AudioChunk): Promise<void>;
   stop(): Promise<void>;
   onSegment(listener: (segment: TranscriptSegment) => void): () => void;
+  onError(listener: (error: Error) => void): () => void;
+}
+
+export interface RealtimeTranscriptDelta {
+  sessionId: string;
+  channelId: string;
+  language: Language;
+  delta: string;
+  sourceElapsedMs?: number;
+  receivedAtUnixMs: number;
+}
+
+export interface RealtimeTranslationChannel {
+  readonly name: string;
+  start(session: ServiceSession, channel: ChannelConfig): Promise<void>;
+  pushAudio(chunk: AudioChunk): Promise<void>;
+  stop(): Promise<void>;
+  onTranscriptDelta(listener: (delta: RealtimeTranscriptDelta) => void): () => void;
+  onAudio(listener: (audio: RenderedSpeech) => void): () => void;
+  onError(listener: (error: Error) => void): () => void;
 }
 
 export interface TranslationProvider {
