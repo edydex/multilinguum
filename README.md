@@ -95,6 +95,8 @@ OpenAI, LiveKit, Cloudflare, and archive/voice keys belong only on the processor
 
 Codex and ChatGPT subscriptions are development tools, not production API credit. Production calls require a separately billed OpenAI API project and API key.
 
+Use the [OpenAI API setup runbook](docs/OPENAI_SETUP.md) to create a dedicated project and install its key on the GPU processor without exposing it in chat or shell history.
+
 ## License
 
 Copyright 2026 Multilinguum contributors. Licensed under [AGPL-3.0-only](LICENSE).
