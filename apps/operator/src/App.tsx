@@ -16,6 +16,7 @@ import { api, subscribe, type OperatorConnection } from './api';
 import { useAudioMeter } from './useAudioMeter';
 import { useAudioStreamer } from './useAudioStreamer';
 import { dbToMeterPercent, signalStatus } from './audioLevel';
+import { ArchiveReview } from './ArchiveReview';
 
 const names: Record<Language, string> = {
   en: 'English',
@@ -146,6 +147,7 @@ export function App() {
   const [health, setHealth] = useState<Record<string, ChannelHealth>>({});
   const [captions, setCaptions] = useState<Record<string, CaptionPair>>({});
   const [archives, setArchives] = useState<ArchiveManifest[]>([]);
+  const [reviewArchive, setReviewArchive] = useState<ArchiveManifest>();
   const [voiceProfiles, setVoiceProfiles] = useState<VoiceProfile[]>([]);
   const [contextDocuments, setContextDocuments] = useState<ContextDocument[]>([]);
   const [selectedContextIds, setSelectedContextIds] = useState<string[]>(() => {
@@ -338,6 +340,8 @@ export function App() {
     }
   };
 
+  const showReviewError = useCallback((message: string) => setError(message), []);
+
   const changeSource = (nextSource: 'en' | 'ru') => {
     setSource(nextSource);
     setTargets((current) => {
@@ -512,7 +516,9 @@ export function App() {
               {tab === 'service'
                 ? 'Sunday service'
                 : tab === 'archives'
-                  ? 'Service archives'
+                  ? reviewArchive
+                    ? 'Review service'
+                    : 'Service archives'
                   : 'Processing node'}
             </h1>
           </div>
@@ -1017,7 +1023,16 @@ export function App() {
           </>
         )}
 
-        {tab === 'archives' && (
+        {tab === 'archives' && reviewArchive && (
+          <ArchiveReview
+            archive={reviewArchive}
+            connection={connection}
+            onClose={() => setReviewArchive(undefined)}
+            onError={showReviewError}
+          />
+        )}
+
+        {tab === 'archives' && !reviewArchive && (
           <section className="panel archive-panel">
             <div className="panel-title">
               <div>
@@ -1029,6 +1044,15 @@ export function App() {
             {archives.length === 0 && <div className="empty">No completed services yet.</div>}
             {archives.map((archive) => {
               const p95Latency = archiveP95Latency(archive);
+              const reviewable = ['en', 'ru'].every(
+                (language) =>
+                  archive.audioTracks.some(
+                    (track) => track.language === language && track.sha256,
+                  ) &&
+                  archive.transcripts.some(
+                    (transcript) => transcript.language === language && transcript.sha256,
+                  ),
+              );
               return (
                 <article className="archive-row" key={archive.sessionId}>
                   <div>
@@ -1051,6 +1075,16 @@ export function App() {
                     <code>{archive.integritySha256?.slice(0, 12) ?? 'recording'}</code>
                   </div>
                   <div className="archive-actions">
+                    <button
+                      className="review-action"
+                      disabled={!reviewable || !archive.latencyReport.sha256}
+                      onClick={() => {
+                        setReviewArchive(archive);
+                        setPlaybackUrl(undefined);
+                      }}
+                    >
+                      Review EN ↔ RU
+                    </button>
                     <button
                       onClick={() =>
                         void api
