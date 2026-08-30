@@ -168,6 +168,49 @@ export function sanitizeNarrationPlan(text: string, plan: NarrationPlan): Narrat
   return { ...plan, emphasis, beats };
 }
 
+/**
+ * Structured generation remains the primary semantic director. This narrow
+ * target-language safeguard catches a common streaming failure where an open
+ * setup lands in the prior window and the short parallel conclusion is then
+ * mislabeled as another setup. It is deliberately limited to compact English
+ * alternatives after an explicit grammatical hook.
+ */
+export function strengthenEnglishParallelFocusPlan(
+  text: string,
+  precedingText: readonly string[],
+  plan: NarrationPlan,
+): NarrationPlan {
+  const previous = precedingText.at(-1)?.trim() ?? '';
+  if (
+    !/\b(?:what|whether|which|who|how)\s+(?:we|you|they|he|she|it|one)\s*[,;:—–-]*$/iu.test(
+      previous,
+    )
+  ) {
+    return plan;
+  }
+  const withoutTerminal = text.replace(/[.!?]+["”’')\]]*$/u, '').trim();
+  const alternatives = withoutTerminal.match(/^(.{1,80}?)\s+(or|and)\s+(.{1,80})$/iu);
+  if (!alternatives) return plan;
+  const left = alternatives[1]?.trim() ?? '';
+  const connector = alternatives[2]?.toLocaleLowerCase() ?? '';
+  const right = alternatives[3]?.trim() ?? '';
+  const compact = (value: string) => value.split(/\s+/u).filter(Boolean).length <= 3;
+  if (!left || !right || !compact(left) || !compact(right)) return plan;
+  return {
+    ...plan,
+    role: connector === 'or' ? 'contrast' : 'enumeration',
+    cadence: 'separated',
+    arc: 'climax',
+    pauseBefore: 'brief',
+    pauseAfter: /[.!?]["”’')\]]*$/u.test(text) ? 'full' : 'brief',
+    emphasis: [left, right],
+    beats: [
+      { text: left, function: 'parallel', strength: 'building' },
+      { text: right, function: 'climax', strength: 'strong' },
+    ],
+  };
+}
+
 export function deliveryInstructions(
   delivery?: SourceDelivery,
   narrationPlan?: NarrationPlan,
@@ -347,7 +390,14 @@ export class OpenAITextTranslationProvider implements TranslationProvider {
       channelId: context.targetLanguage,
       language: context.targetLanguage,
       text,
-      narrationPlan: sanitizeNarrationPlan(text, result.narrationPlan),
+      narrationPlan:
+        context.targetLanguage === 'en'
+          ? strengthenEnglishParallelFocusPlan(
+              text,
+              context.precedingText,
+              sanitizeNarrationPlan(text, result.narrationPlan),
+            )
+          : sanitizeNarrationPlan(text, result.narrationPlan),
       emittedAt: new Date().toISOString(),
     };
   }

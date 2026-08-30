@@ -4,6 +4,7 @@ import {
   deliveryInstructions,
   normalizeNarrationText,
   sanitizeNarrationPlan,
+  strengthenEnglishParallelFocusPlan,
 } from './openai-cascade.js';
 
 describe('OpenAI cascade narration preparation', () => {
@@ -26,6 +27,36 @@ describe('OpenAI cascade narration preparation', () => {
       'but first of all with what we',
     );
     expect(deliveryInstructions(undefined, setup)).toContain('without trailing off or fading');
+  });
+
+  it('makes a short parallel conclusion audible when its setup landed in the prior window', () => {
+    const weak: NarrationPlan = {
+      role: 'transition',
+      cadence: 'flowing',
+      arc: 'setup',
+      pauseBefore: 'none',
+      pauseAfter: 'connected',
+      emphasis: [],
+      beats: [],
+    };
+    const strengthened = strengthenEnglishParallelFocusPlan(
+      'understand or remember.',
+      ['but first of all with what we'],
+      weak,
+    );
+    expect(strengthened).toMatchObject({
+      role: 'contrast',
+      cadence: 'separated',
+      arc: 'climax',
+      pauseBefore: 'brief',
+      pauseAfter: 'full',
+      emphasis: ['understand', 'remember'],
+    });
+    expect(strengthened.beats).toEqual([
+      { text: 'understand', function: 'parallel', strength: 'building' },
+      { text: 'remember', function: 'climax', strength: 'strong' },
+    ]);
+    expect(deliveryInstructions(undefined, strengthened)).toContain('“understand”, “remember”');
   });
 
   it('turns source delivery measurements into bounded speech direction', () => {

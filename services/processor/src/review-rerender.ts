@@ -9,6 +9,7 @@ import { defaultGlossary } from './glossary.js';
 import {
   OpenAINaturalSpeechRenderer,
   OpenAITextTranslationProvider,
+  strengthenEnglishParallelFocusPlan,
 } from './providers/openai-cascade.js';
 import {
   buildCaptionWordTimings,
@@ -24,6 +25,8 @@ const apiKey = process.env.OPENAI_API_KEY;
 const rawSourcePath = process.env.REVIEW_RAW_SOURCE_TRANSCRIPT_PATH;
 const priorTranslationPath = process.env.REVIEW_PRIOR_TRANSLATION_PATH;
 const outputDirectory = process.env.REVIEW_OUTPUT_DIR;
+const outputVersion = process.env.REVIEW_OUTPUT_VERSION ?? 'v2';
+const cachedTranslationPath = process.env.REVIEW_CACHED_TRANSLATION_PATH;
 const archiveRoot = process.env.ARCHIVE_ROOT ?? './data/archives';
 const contextDocumentIds = (process.env.REVIEW_CONTEXT_DOCUMENT_IDS ?? '')
   .split(',')
@@ -36,6 +39,9 @@ if (!apiKey) throw new Error('OPENAI_API_KEY is required.');
 if (!rawSourcePath) throw new Error('REVIEW_RAW_SOURCE_TRANSCRIPT_PATH is required.');
 if (!priorTranslationPath) throw new Error('REVIEW_PRIOR_TRANSLATION_PATH is required.');
 if (!outputDirectory) throw new Error('REVIEW_OUTPUT_DIR is required.');
+if (!/^[a-z0-9-]{1,24}$/u.test(outputVersion)) {
+  throw new Error('REVIEW_OUTPUT_VERSION must contain only lowercase letters, digits, or hyphens.');
+}
 
 function parseJsonl<T>(contents: string): T[] {
   return contents
@@ -125,6 +131,13 @@ const [rawSourceText, priorTranslationText] = await Promise.all([
   readFile(path.resolve(priorTranslationPath), 'utf8'),
 ]);
 const priorTranslation = parseJsonl<TranscriptSegment>(priorTranslationText);
+const cachedTranslations = cachedTranslationPath
+  ? new Map(
+      parseJsonl<TranscriptSegment>(await readFile(path.resolve(cachedTranslationPath), 'utf8'))
+        .filter((segment) => segment.final)
+        .map((segment) => [segment.sequence, segment]),
+    )
+  : undefined;
 const sessionId = `review-rerender-${new Date().toISOString().replace(/[:.]/gu, '-')}`;
 const sources = buildReviewSourceSegments(
   parseJsonl<TranscriptSegment>(rawSourceText),
@@ -146,14 +159,22 @@ let audioCursorMs = 0;
 for (const [index, source] of sources.entries()) {
   const followingText = sources[index + 1]?.text;
   const translationStartedAtUnixMs = Date.now();
-  const translated = await translator.translate(source, {
-    sourceLanguage: 'ru',
-    targetLanguage: 'en',
-    glossary: defaultGlossary.en,
-    precedingText,
-    ...(followingText ? { followingText } : {}),
-    sermonNotes: await context.retrieve(contextDocumentIds, source.text),
-  });
+  const cached = cachedTranslations?.get(source.sequence);
+  const translated = cached
+    ? {
+        ...cached,
+        narrationPlan: cached.narrationPlan
+          ? strengthenEnglishParallelFocusPlan(cached.text, precedingText, cached.narrationPlan)
+          : undefined,
+      }
+    : await translator.translate(source, {
+        sourceLanguage: 'ru',
+        targetLanguage: 'en',
+        glossary: defaultGlossary.en,
+        precedingText,
+        ...(followingText ? { followingText } : {}),
+        sermonNotes: await context.retrieve(contextDocumentIds, source.text),
+      });
   const translationCompletedAtUnixMs = Date.now();
   const finalized: TranscriptSegment = {
     ...translated,
@@ -216,7 +237,7 @@ for (const [index, source] of sources.entries()) {
       playoutQueueMs: audioCursorMs,
     },
     engines: {
-      translation: translator.name,
+      translation: cached ? `${translator.name}:cached` : translator.name,
       speechRenderer: renderer.name,
       relay: 'offline-review',
     },
@@ -230,18 +251,25 @@ const outputRoot = path.resolve(outputDirectory);
 await mkdir(outputRoot, { recursive: true, mode: 0o700 });
 const pcm = Buffer.concat(audioChunks.map((chunk) => Buffer.from(chunk)));
 const wav = wavFromPcmMono(pcm, 48_000);
-const wavPath = path.join(outputRoot, 'translated-en-v2.wav');
-const mp3Path = path.join(outputRoot, 'translated-en-v2.mp3');
-const opusPath = path.join(outputRoot, 'translated-en-v2.opus');
+const outputBase = `translated-en-${outputVersion}`;
+const wavPath = path.join(outputRoot, `${outputBase}.wav`);
+const mp3Path = path.join(outputRoot, `${outputBase}.mp3`);
+const opusPath = path.join(outputRoot, `${outputBase}.opus`);
 await Promise.all([
   writeFile(wavPath, wav, { mode: 0o600 }),
-  writeFile(path.join(outputRoot, 'translated-en-v2.jsonl'), jsonl(translatedSegments), {
+  writeFile(path.join(outputRoot, `${outputBase}.jsonl`), jsonl(translatedSegments), {
     mode: 0o600,
   }),
-  writeFile(path.join(outputRoot, 'review-source-segments-v2.jsonl'), jsonl(sources), {
+  writeFile(
+    path.join(outputRoot, `review-source-segments-${outputVersion}.jsonl`),
+    jsonl(sources),
+    {
+      mode: 0o600,
+    },
+  ),
+  writeFile(path.join(outputRoot, `latency-${outputVersion}.jsonl`), jsonl(latencySamples), {
     mode: 0o600,
   }),
-  writeFile(path.join(outputRoot, 'latency-v2.jsonl'), jsonl(latencySamples), { mode: 0o600 }),
 ]);
 await Promise.all([
   execFileAsync('ffmpeg', [
@@ -281,6 +309,7 @@ const report = {
     sourceTranscript: path.basename(rawSourcePath),
     priorSegmentation: path.basename(priorTranslationPath),
     contextDocumentIds,
+    cachedTranslation: cachedTranslationPath ? path.basename(cachedTranslationPath) : null,
   },
   output: {
     segmentCount: translatedSegments.length,
@@ -289,8 +318,10 @@ const report = {
     opus: { bytes: opus.byteLength, sha256: sha256(opus) },
   },
 };
-await writeFile(path.join(outputRoot, 'result-v2.json'), `${JSON.stringify(report, null, 2)}\n`, {
-  mode: 0o600,
-});
+await writeFile(
+  path.join(outputRoot, `result-${outputVersion}.json`),
+  `${JSON.stringify(report, null, 2)}\n`,
+  { mode: 0o600 },
+);
 await rm(wavPath, { force: true });
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
