@@ -60,7 +60,9 @@ function initialTargets(source: 'en' | 'ru'): Record<Language, TargetDraft> {
     allLanguages.map((language) => [
       language,
       {
-        enabled: true,
+        // Keep v1 testing focused on the Russian/English pair. Spanish and
+        // Ukrainian remain available, but begin opt-in until their latency is tuned.
+        enabled: language === 'en' || language === 'ru',
         outputMode: language === source ? 'source' : 'generic-expressive',
         profileId: '',
       },

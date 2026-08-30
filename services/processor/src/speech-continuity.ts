@@ -1,8 +1,7 @@
-import type { CaptionWordTiming, RenderedSpeech } from '@multilinguum/protocol';
+import type { CaptionWordTiming, NarrationPlan, RenderedSpeech } from '@multilinguum/protocol';
 
 const frameSamples = 480;
 const silenceRms = 72;
-const leadingRoomSamples = frameSamples * 4;
 const fadeSamples = frameSamples;
 
 function frameRms(samples: Int16Array, start: number, end: number): number {
@@ -25,9 +24,29 @@ export function preservedTrailingPauseMs(sourcePauseAfterMs?: number): number {
   return Math.max(100, Math.min(550, Math.round(sourcePauseAfterMs * 0.75)));
 }
 
+/**
+ * Once a semantic director has planned the target-language boundary, its
+ * decision replaces the source-language pause. This avoids transplanting a
+ * Russian boundary into English while retaining the old bounded behavior for
+ * providers that do not return a narration plan.
+ */
+export function targetTrailingPauseMs(plan?: NarrationPlan, sourcePauseAfterMs?: number): number {
+  if (!plan) return preservedTrailingPauseMs(sourcePauseAfterMs);
+  return {
+    connected: 80,
+    brief: 170,
+    full: 300,
+  }[plan.pauseAfter];
+}
+
+export function targetLeadingPauseMs(plan?: NarrationPlan): number {
+  return plan?.pauseBefore === 'brief' ? 140 : 40;
+}
+
 export function prepareSpeechForContinuousPlayout(
   chunk: RenderedSpeech,
-  sourcePauseAfterMs?: number,
+  trailingPauseMs = 100,
+  leadingPauseMs = 40,
 ): RenderedSpeech {
   if (
     chunk.encoding !== 'pcm_s16le' ||
@@ -48,18 +67,31 @@ export function prepareSpeechForContinuousPlayout(
     lastActive = end;
   }
   if (firstActive < 0 || lastActive < 0) return chunk;
-  const start = Math.max(0, firstActive - leadingRoomSamples);
+  const leadingRoomSamples = Math.round(
+    (Math.max(20, Math.min(220, leadingPauseMs)) / 1_000) * chunk.sampleRate,
+  );
+  const desiredStart = firstActive - leadingRoomSamples;
+  const start = Math.max(0, desiredStart);
+  const leadingPaddingSamples = Math.max(0, -desiredStart);
   const trailingRoomSamples = Math.round(
-    (preservedTrailingPauseMs(sourcePauseAfterMs) / 1_000) * chunk.sampleRate,
+    (Math.max(60, Math.min(550, trailingPauseMs)) / 1_000) * chunk.sampleRate,
   );
   const desiredEnd = lastActive + trailingRoomSamples;
   const end = Math.min(samples.length, desiredEnd);
-  if (start === 0 && end === samples.length && desiredEnd <= samples.length) return chunk;
+  if (
+    start === 0 &&
+    end === samples.length &&
+    desiredEnd <= samples.length &&
+    leadingPaddingSamples === 0
+  ) {
+    return chunk;
+  }
   const sliced = samples.slice(start, end);
   let output = sliced;
-  if (desiredEnd > samples.length) {
-    output = new Int16Array(sliced.length + desiredEnd - samples.length);
-    output.set(sliced);
+  const trailingPaddingSamples = Math.max(0, desiredEnd - samples.length);
+  if (leadingPaddingSamples > 0 || trailingPaddingSamples > 0) {
+    output = new Int16Array(leadingPaddingSamples + sliced.length + trailingPaddingSamples);
+    output.set(sliced, leadingPaddingSamples);
   }
   const edge = Math.min(fadeSamples, Math.floor(output.length / 4));
   for (let index = 0; index < edge; index += 1) {
@@ -89,6 +121,7 @@ export function estimateSpeechDurationMs(text: string): number {
 export function buildCaptionWordTimings(
   text: string,
   spokenDurationMs: number,
+  initialOffsetMs = 0,
 ): CaptionWordTiming[] {
   const words = text.trim().match(/\S+/gu) ?? [];
   if (words.length === 0) return [];
@@ -102,7 +135,7 @@ export function buildCaptionWordTimings(
     return Math.max(0.75, 0.68 + letters * 0.095 + punctuation);
   });
   const totalWeight = weights.reduce((sum, value) => sum + value, 0);
-  let cursor = 0;
+  let cursor = initialOffsetMs;
   return words.map((word, index) => {
     const startOffsetMs = Math.round(cursor);
     cursor += (spokenDurationMs * (weights[index] ?? 1)) / totalWeight;

@@ -300,6 +300,59 @@ describe('RealtimeCapturePipeline', () => {
     expect(calls.filter((call) => (call[3] as Set<string>).has('channel-ru'))).toHaveLength(2);
   });
 
+  it('waits briefly for intent context and excludes the preview from narrated text', async () => {
+    vi.useFakeTimers();
+    const calls: unknown[][] = [];
+    const engine = {
+      ingestSourceAudio: async () => undefined,
+      ingestLiveTranscript: async (...input: unknown[]) => {
+        calls.push(input);
+        return [];
+      },
+      reportChannelFailure: () => undefined,
+    } as unknown as SessionEngine;
+    const transcriber = new FakeTranscriber();
+    const pipeline = new RealtimeCapturePipeline(
+      engine,
+      cascadeSession(),
+      transcriber,
+      () => new FakeTranslationChannel(),
+    );
+    await pipeline.start();
+    const base = {
+      sessionId: 'session-live-test',
+      channelId: 'source-ru',
+      language: 'ru' as const,
+      emittedAt: new Date().toISOString(),
+      final: true,
+      sourcePauseAfterMs: 360,
+    };
+    transcriber.emit({
+      ...base,
+      id: 'contrast-setup',
+      text: 'Павел не просто просит.',
+      sourceStartMs: 0,
+      sourceEndMs: 3_000,
+      sequence: 0,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(calls.filter((call) => (call[3] as Set<string>).has('channel-en'))).toHaveLength(0);
+
+    transcriber.emit({
+      ...base,
+      id: 'contrast-preview',
+      text: 'Он даже не приказывает, но',
+      sourceStartMs: 3_000,
+      sourceEndMs: 4_500,
+      sequence: 1,
+    });
+    await pipeline.close();
+
+    const cascadeCall = calls.find((call) => (call[3] as Set<string>).has('channel-en'));
+    expect(cascadeCall?.[0]).toEqual(expect.objectContaining({ text: 'Павел не просто просит.' }));
+    expect(cascadeCall?.[4]).toBe('Он даже не приказывает, но');
+  });
+
   it('publishes a complete sentence but drops an unfinished fragment at Stop', async () => {
     const calls: unknown[][] = [];
     const engine = {

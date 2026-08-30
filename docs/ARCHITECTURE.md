@@ -27,7 +27,7 @@ The Tauri shell is a private controller. The Web Audio capture path requests a m
 
 ### Processor
 
-The processor owns every provider credential and the authoritative session state. It validates all operator input with Zod, limits the system to one church service, sequences each target independently, measures actual relay backlog, and automatically moves cloned output to the natural renderer after ten seconds. Expressive translation produces a provider-neutral semantic narration plan alongside each finalized clause: a bounded role, cadence, and only exact emphasis spans present in the translated text. The speech renderer receives that plan rather than provider-specific events, so rhetorical enumeration, contrast, and appeal can survive the text boundary without allowing arbitrary model instructions into TTS. Expressive channels translate in source order while rendering upcoming clauses concurrently; a separate ordered playout chain trims only synthetic edge silence, retains bounded source-pause cadence, feeds a larger LiveKit queue continuously, and publishes the scheduled playout span used by listener karaoke captions.
+The processor owns every provider credential and the authoritative session state. It validates all operator input with Zod, limits the system to one church service, sequences each target independently, measures actual relay backlog, and automatically moves cloned output to the natural renderer after ten seconds. Expressive translation produces a provider-neutral semantic narration plan alongside each finalized clause: a bounded rhetorical role, cadence, cross-segment arc position, target-language boundary, and only exact emphasis/beat spans present in the translated text. A complete clause waits no more than 1.8 seconds for optional intent-only preview text, which the translation prompt explicitly forbids from entering the spoken translation. The renderer receives the sanitized plan rather than provider-specific events, so enumeration, contrast, appeal, and climax can survive text boundaries without allowing arbitrary model instructions into TTS. Source acoustics supply broad pace and energy evidence only; target-language semantics choose pitch intent, focus, and pauses. Expressive channels translate in source order while rendering upcoming clauses concurrently; a separate ordered playout chain trims synthetic edge silence, applies the director's connection or thought boundary, feeds a larger LiveKit queue continuously, and publishes the scheduled playout span used by listener karaoke captions.
 
 Provider-specific events do not enter UI state. The shared boundaries are:
 
@@ -54,7 +54,7 @@ Muse Glimmer is not a translation provider.
 
 ### Voice identity
 
-Identity and prosody are separate controls. Chatterbox V3 supplies the consented timbre. Chunk timing, punctuation, source pace, energy, and conservative exaggeration guide delivery. Exact pitch copying is neither implemented nor promised.
+Identity and prosody are separate controls. Chatterbox V3 supplies the consented timbre. The target-language semantic director—not Russian sentence contour—selects delivery beats, focus, and boundaries; source pace and energy remain broad affect evidence. Exact pitch copying is neither implemented nor promised.
 
 The first clone policy is RU to EN for the explicitly authorized preacher. The worker refuses absent/revoked profiles, encrypts reference samples with AES-256-GCM, and deletes the encrypted sample when revoked.
 

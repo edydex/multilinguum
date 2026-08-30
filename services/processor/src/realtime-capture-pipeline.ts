@@ -31,9 +31,11 @@ interface CapturePoint {
 interface CascadeBuffer {
   segment: TranscriptSegment;
   timing: Parameters<SessionEngine['ingestLiveTranscript']>[1];
+  lookaheadText?: string;
 }
 
 const expressiveMaximumWindowMs = 7_000;
+const semanticLookaheadWaitMs = 1_800;
 const sourcePauseCommitMs = 360;
 const minimumSpeechWindowMs = 1_200;
 const minimumNarrationWindowMs = 1_600;
@@ -46,6 +48,10 @@ function lastSentenceBoundary(text: string): number {
     boundary = (match.index ?? 0) + match[0].length;
   }
   return boundary;
+}
+
+function sentenceBoundaryCount(text: string): number {
+  return [...text.matchAll(/[.!?…]["'»”)]*(?=\s|$)/gu)].length;
 }
 
 function wordCount(text: string): number {
@@ -111,6 +117,7 @@ export class RealtimeCapturePipeline {
   #speechRmsBaseline = speechRmsThreshold;
   #silenceDurationMs = 0;
   #lastPauseCommitMs = 0;
+  #cascadeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   #started = false;
 
   constructor(
@@ -219,6 +226,7 @@ export class RealtimeCapturePipeline {
     await Promise.allSettled([...this.#channels.values()].map((channel) => channel.stop()));
     await this.#transcriber.stop();
     for (const channelId of this.#transcriptBuffers.keys()) this.#flushTranscript(channelId);
+    this.#clearCascadeFlushTimer();
     this.#flushCompletedCascadeAtStop();
     await Promise.all([
       this.#sourceTranscriptChain,
@@ -337,6 +345,7 @@ export class RealtimeCapturePipeline {
       (channel) => channel.voiceMode !== 'source' && !this.#activeDirectChannelIds.has(channel.id),
     );
     if (!hasCascadeChannel) return;
+    this.#clearCascadeFlushTimer();
     const existing = this.#cascadeBuffer?.segment;
     this.#cascadeBuffer = {
       segment: existing
@@ -362,6 +371,18 @@ export class RealtimeCapturePipeline {
       durationMs * Math.min(1, boundary / Math.max(1, buffered.text.length)),
     );
     const holdForRhetoricalList = shouldHoldForRhetoricalList(buffered.text.slice(0, boundary));
+    const completeSentenceCount = sentenceBoundaryCount(buffered.text.slice(0, boundary));
+    const hasOnlyOneCompleteSentence =
+      completeSentenceCount === 1 && boundary === buffered.text.trimEnd().length;
+    if (
+      hasOnlyOneCompleteSentence &&
+      isNarrationReady(buffered.text, durationMs) &&
+      !holdForRhetoricalList &&
+      durationMs < expressiveMaximumWindowMs
+    ) {
+      this.#scheduleCascadeFlush();
+      return;
+    }
     if (
       boundary > 0 &&
       isNarrationReady(buffered.text.slice(0, boundary), boundaryDurationMs) &&
@@ -409,6 +430,7 @@ export class RealtimeCapturePipeline {
         ...(remainingText ? { sourcePauseAfterMs: undefined } : {}),
       },
       timing: completeTiming,
+      ...(remainingText ? { lookaheadText: remainingText } : {}),
     };
     this.#flushCascadeTranscript();
     if (remainingText) {
@@ -428,6 +450,7 @@ export class RealtimeCapturePipeline {
   #flushCascadeTranscript(): void {
     const buffered = this.#cascadeBuffer;
     if (!buffered) return;
+    this.#clearCascadeFlushTimer();
     this.#cascadeBuffer = undefined;
     this.#cascadeSequence += 1;
     const cascadeChannelIds = this.#cascadeChannelIds();
@@ -443,6 +466,7 @@ export class RealtimeCapturePipeline {
           buffered.timing,
           this.#activeDirectChannelIds,
           cascadeChannelIds,
+          buffered.lookaheadText,
         );
       })
       .catch((error) => {
@@ -453,6 +477,19 @@ export class RealtimeCapturePipeline {
           );
         }
       });
+  }
+
+  #scheduleCascadeFlush(): void {
+    this.#cascadeFlushTimer = setTimeout(() => {
+      this.#cascadeFlushTimer = undefined;
+      this.#flushCascadeTranscript();
+    }, semanticLookaheadWaitMs);
+  }
+
+  #clearCascadeFlushTimer(): void {
+    if (!this.#cascadeFlushTimer) return;
+    clearTimeout(this.#cascadeFlushTimer);
+    this.#cascadeFlushTimer = undefined;
   }
 
   #cascadeChannelIds(): Set<string> {
@@ -489,6 +526,7 @@ export class RealtimeCapturePipeline {
   }
 
   #flushCompletedCascadeAtStop(): void {
+    this.#clearCascadeFlushTimer();
     const buffered = this.#cascadeBuffer;
     if (!buffered) return;
     const boundary = lastSentenceBoundary(buffered.segment.text);

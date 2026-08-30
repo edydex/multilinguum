@@ -26,8 +26,9 @@ import {
   buildCaptionWordTimings,
   estimateSpeechDurationMs,
   prepareSpeechForContinuousPlayout,
-  preservedTrailingPauseMs,
   speechDurationMs,
+  targetLeadingPauseMs,
+  targetTrailingPauseMs,
 } from './speech-continuity.js';
 
 export interface SessionEngineDependencies {
@@ -247,6 +248,7 @@ export class SessionEngine {
     timing?: SourceProcessingTiming,
     directChannelIds: ReadonlySet<string> = new Set(),
     onlyChannelIds?: ReadonlySet<string>,
+    translationLookahead?: string,
   ): Promise<TranscriptSegment[]> {
     const session = this.#requiredSession();
     if (session.state !== 'live') throw new Error('Session is not live.');
@@ -266,6 +268,7 @@ export class SessionEngine {
         return !directChannelIds.has(runtime.config.id);
       },
       undefined,
+      translationLookahead,
     );
   }
 
@@ -525,6 +528,7 @@ export class SessionEngine {
     runtime: RuntimeChannel,
     sourceTiming?: SourceProcessingTiming,
     sourceAudioSpan?: LatencySpan,
+    followingText?: string,
   ): Promise<TranscriptSegment | undefined> {
     if (runtime.config.muted) return undefined;
     const session = this.#requiredSession();
@@ -542,6 +546,7 @@ export class SessionEngine {
             targetLanguage: runtime.config.targetLanguage,
             glossary: defaultGlossary[runtime.config.targetLanguage],
             precedingText: runtime.precedingText,
+            ...(followingText ? { followingText } : {}),
             sermonNotes: await this.#dependencies.context.retrieve(
               session.contextDocumentIds,
               source.text,
@@ -685,6 +690,11 @@ export class SessionEngine {
     const session = this.#requiredSession();
     const estimateMs = estimateSpeechDurationMs(input.translated.text);
     const playbackBacklogMs = this.#playbackBacklogMs(input.runtime);
+    const trailingPauseMs = targetTrailingPauseMs(
+      input.translated.narrationPlan,
+      input.source.sourcePauseAfterMs,
+    );
+    const leadingPauseMs = targetLeadingPauseMs(input.translated.narrationPlan);
     input.runtime.pendingAudioEstimateMs += estimateMs;
     const renderStartedAtUnixMs = Date.now();
     const renderPromise = this.#render(input.runtime, input.translated, {
@@ -693,7 +703,7 @@ export class SessionEngine {
     }).then(
       (rendered) => ({
         ok: true as const,
-        rendered: prepareSpeechForContinuousPlayout(rendered, input.source.sourcePauseAfterMs),
+        rendered: prepareSpeechForContinuousPlayout(rendered, trailingPauseMs, leadingPauseMs),
         speechRender: {
           startedAtUnixMs: renderStartedAtUnixMs,
           completedAtUnixMs: Date.now(),
@@ -729,15 +739,14 @@ export class SessionEngine {
         const audioStartedAtUnixMs = Date.now();
         const queuedBeforeMs = this.#dependencies.relay.audioBacklogMs(input.runtime.config.id);
         const playoutStartAtUnixMs = audioStartedAtUnixMs + queuedBeforeMs;
-        const preservedPauseMs = preservedTrailingPauseMs(input.source.sourcePauseAfterMs);
-        const spokenDurationMs = Math.max(1, durationMs - preservedPauseMs);
+        const spokenDurationMs = Math.max(1, durationMs - trailingPauseMs - leadingPauseMs);
         const queuedCaption: TranscriptSegment = {
           ...input.translated,
           phase: 'queued',
           playout: {
             startAtUnixMs: playoutStartAtUnixMs,
             endAtUnixMs: playoutStartAtUnixMs + durationMs,
-            words: buildCaptionWordTimings(input.translated.text, spokenDurationMs),
+            words: buildCaptionWordTimings(input.translated.text, spokenDurationMs, leadingPauseMs),
           },
         };
         const captionStartedAtUnixMs = Date.now();
@@ -837,6 +846,7 @@ export class SessionEngine {
     timing: SourceProcessingTiming | undefined,
     include: (runtime: RuntimeChannel) => boolean,
     sourceAudioSequence: number | undefined,
+    translationLookahead?: string,
   ): Promise<TranscriptSegment[]> {
     const sourceAudioSpan =
       sourceAudioSequence === undefined
@@ -845,7 +855,9 @@ export class SessionEngine {
     const results = await Promise.all(
       [...this.#channels.values()]
         .filter(include)
-        .map((channel) => this.#processChannel(source, channel, timing, sourceAudioSpan)),
+        .map((channel) =>
+          this.#processChannel(source, channel, timing, sourceAudioSpan, translationLookahead),
+        ),
     );
     if (sourceAudioSequence !== undefined) this.#sourceAudioSpans.delete(sourceAudioSequence);
     return results.filter((segment): segment is TranscriptSegment => Boolean(segment));

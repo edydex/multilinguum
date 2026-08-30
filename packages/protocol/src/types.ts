@@ -192,16 +192,40 @@ export interface TranscriptSegment {
 }
 
 export interface SourceDelivery {
+  /** Broad source-language performance evidence, not a target-language prosody prescription. */
   pace: 'measured' | 'steady' | 'animated';
   energy: 'soft' | 'balanced' | 'emphatic';
   contour: 'statement' | 'question' | 'continuation' | 'exclamation';
 }
 
+export interface NarrationBeat {
+  /** Exact translated-text span that anchors this part of the English delivery arc. */
+  text: string;
+  function: 'setup' | 'parallel' | 'contrast' | 'climax' | 'resolution';
+  strength: 'restrained' | 'normal' | 'building' | 'strong';
+}
+
 export interface NarrationPlan {
-  role: 'neutral' | 'question' | 'enumeration' | 'contrast' | 'appeal' | 'quotation' | 'transition';
+  role:
+    | 'neutral'
+    | 'question'
+    | 'enumeration'
+    | 'contrast'
+    | 'appeal'
+    | 'exhortation'
+    | 'warning'
+    | 'correction'
+    | 'quotation'
+    | 'transition';
   cadence: 'flowing' | 'measured' | 'separated' | 'urgent';
+  /** Position of this segment in the target-language rhetorical thought. */
+  arc: 'standalone' | 'setup' | 'build' | 'climax' | 'resolution';
+  pauseBefore: 'none' | 'brief';
+  pauseAfter: 'connected' | 'brief' | 'full';
   /** Exact substrings in translated text that carry the thought's primary stress. */
   emphasis: string[];
+  /** Ordered, target-language-native performance anchors. */
+  beats: NarrationBeat[];
 }
 
 export interface CaptionWordTiming {

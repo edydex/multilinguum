@@ -28,13 +28,15 @@ export interface TranslationContext {
   targetLanguage: Language;
   glossary: Readonly<Record<string, string>>;
   precedingText: string[];
+  /** Uncommitted source preview for intent only; its words must not enter this translation. */
+  followingText?: string | undefined;
   sermonNotes?: string[];
 }
 
 export interface SpeechRenderContext {
   /** Audio already queued or being rendered ahead of this clause. */
   playbackBacklogMs: number;
-  /** Coarse delivery cues measured from the corresponding source-audio clause. */
+  /** Broad source-language evidence; renderers must not mirror its word stress or pitch contour. */
   sourceDelivery?: SourceDelivery | undefined;
 }
 

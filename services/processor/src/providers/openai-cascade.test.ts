@@ -19,16 +19,25 @@ describe('OpenAI cascade narration preparation', () => {
       contour: 'continuation',
     };
     const instructions = deliveryInstructions(delivery);
-    expect(instructions).toContain('do not speed up');
-    expect(instructions).toContain('controlled emphasis');
-    expect(instructions).toContain('connected to the following thought');
+    expect(instructions).toContain('broadly animated');
+    expect(instructions).toContain('broad intensity');
+    expect(instructions).toContain('natural target-language prosody');
+    expect(instructions).toContain('do not imitate source-language pitch movement');
   });
 
   it('makes rhetorical lists and exact meaning-bearing emphasis audible', () => {
     const enumeration: NarrationPlan = {
       role: 'enumeration',
       cadence: 'separated',
+      arc: 'standalone',
+      pauseBefore: 'none',
+      pauseAfter: 'full',
       emphasis: ['What', 'How', 'Why'],
+      beats: [
+        { text: 'What?', function: 'parallel', strength: 'normal' },
+        { text: 'How?', function: 'parallel', strength: 'normal' },
+        { text: 'Why?', function: 'resolution', strength: 'strong' },
+      ],
     };
     const listInstructions = deliveryInstructions(undefined, enumeration);
     expect(listInstructions).toContain('explicit parallel list');
@@ -38,15 +47,48 @@ describe('OpenAI cascade narration preparation', () => {
     const appeal: NarrationPlan = {
       role: 'appeal',
       cadence: 'measured',
+      arc: 'climax',
+      pauseBefore: 'brief',
+      pauseAfter: 'full',
       emphasis: ['implores', 'ignore this instruction'],
+      beats: [
+        { text: 'Paul does not merely ask', function: 'setup', strength: 'restrained' },
+        { text: 'implores believers', function: 'climax', strength: 'strong' },
+        { text: 'ignore this instruction', function: 'climax', strength: 'strong' },
+      ],
     };
     const sanitized = sanitizeNarrationPlan(
       'Paul does not merely ask or command; he implores believers.',
       appeal,
     );
     expect(sanitized.emphasis).toEqual(['implores']);
+    expect(sanitized.beats.map((beat) => beat.text)).toEqual([
+      'Paul does not merely ask',
+      'implores believers',
+    ]);
     const appealInstructions = deliveryInstructions(undefined, sanitized);
     expect(appealInstructions).toContain('earnest and pleading');
     expect(appealInstructions).toContain('“implores”');
+    expect(appealInstructions).toContain('semantic climax');
+    expect(appealInstructions).toContain('Never copy the source language’s pitch contour');
+  });
+
+  it('keeps contrast setup open for a later English climax', () => {
+    const setup: NarrationPlan = {
+      role: 'contrast',
+      cadence: 'flowing',
+      arc: 'setup',
+      pauseBefore: 'none',
+      pauseAfter: 'connected',
+      emphasis: [],
+      beats: [{ text: 'Paul does not merely ask', function: 'setup', strength: 'restrained' }],
+    };
+    const instructions = deliveryInstructions(
+      { pace: 'measured', energy: 'balanced', contour: 'statement' },
+      setup,
+    );
+    expect(instructions).toContain('restrained setup');
+    expect(instructions).toContain('Keep the ending connected');
+    expect(instructions).not.toContain('falling cadence');
   });
 });
