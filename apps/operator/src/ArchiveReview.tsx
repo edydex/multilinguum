@@ -8,10 +8,12 @@ import type {
 import { api, type OperatorConnection } from './api';
 import {
   activeWordIndex,
-  audioTimeAtSource,
+  buildDefaultThoughtAnchors,
   buildReviewTrack,
   parseJsonLines,
   sourceTimeAtAudio,
+  thoughtAlignedAudioTime,
+  thoughtAnchorAtSource,
   wordAudioTime,
   type ReviewSegment,
   type ReviewTrack,
@@ -104,6 +106,10 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
   }, [archive, connection, onError]);
 
   const activeTrack = tracks[language];
+  const thoughtAnchors = useMemo(
+    () => buildDefaultThoughtAnchors(tracks.en?.segments ?? []),
+    [tracks.en],
+  );
   const activeSegment = useMemo(() => {
     if (!activeTrack) return undefined;
     return (
@@ -113,6 +119,7 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
     );
   }, [activeTrack, audioMs]);
   const sourceMs = activeTrack ? sourceTimeAtAudio(activeTrack, audioMs) : 0;
+  const activeThought = thoughtAnchorAtSource(thoughtAnchors, sourceMs);
 
   const applyPendingSeek = () => {
     const audio = audioRef.current;
@@ -129,9 +136,14 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
     const nextTrack = tracks[nextLanguage];
     const audio = audioRef.current;
     if (!currentTrack || !nextTrack || nextLanguage === language) return;
-    const semanticPosition = sourceTimeAtAudio(currentTrack, (audio?.currentTime ?? 0) * 1_000);
+    const alignedPosition = thoughtAlignedAudioTime(
+      currentTrack,
+      nextTrack,
+      (audio?.currentTime ?? 0) * 1_000,
+      thoughtAnchors,
+    );
     pendingSeek.current = {
-      audioMs: audioTimeAtSource(nextTrack, semanticPosition),
+      audioMs: alignedPosition.audioMs,
       play: Boolean(audio && !audio.paused),
     };
     setLanguage(nextLanguage);
@@ -234,8 +246,15 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
         <span>
           <i /> click a word to seek
         </span>
-        <span>Word timing is estimated within each finalized phrase.</span>
+        <span>Language switches restart the matching thought.</span>
       </div>
+
+      {activeThought && (
+        <div className="review-thought" aria-live="polite">
+          <span>Thought anchor</span>
+          <strong>{activeThought.label}</strong>
+        </div>
+      )}
 
       <div className="review-transcript" aria-label={`${language.toUpperCase()} transcript`}>
         {activeTrack.segments.map((segment) => {
