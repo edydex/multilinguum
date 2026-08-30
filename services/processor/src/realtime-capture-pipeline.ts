@@ -4,6 +4,7 @@ import type {
   RealtimeTranslationChannel,
   RenderedSpeech,
   ServiceSession,
+  SourceDelivery,
   TranscriptSegment,
   Transcriber,
 } from '@multilinguum/protocol';
@@ -21,8 +22,10 @@ interface TranscriptBuffer {
 }
 
 interface CapturePoint {
+  startMs: number;
   endMs: number;
   capturedAtUnixMs: number;
+  rms: number;
 }
 
 interface CascadeBuffer {
@@ -31,9 +34,9 @@ interface CascadeBuffer {
 }
 
 const expressiveMaximumWindowMs = 7_000;
-const provisionalTranslationIntervalMs = 300;
 const sourcePauseCommitMs = 360;
 const minimumSpeechWindowMs = 1_200;
+const minimumNarrationWindowMs = 1_600;
 const speechRmsThreshold = 190;
 
 function lastSentenceBoundary(text: string): number {
@@ -43,6 +46,27 @@ function lastSentenceBoundary(text: string): number {
     boundary = (match.index ?? 0) + match[0].length;
   }
   return boundary;
+}
+
+function wordCount(text: string): number {
+  return text.trim().split(/\s+/u).filter(Boolean).length;
+}
+
+function isNarrationReady(text: string, durationMs: number): boolean {
+  const words = wordCount(text);
+  if (durationMs < minimumNarrationWindowMs) return false;
+  if (words >= 4) return true;
+  return words >= 3 && durationMs >= 2_800;
+}
+
+function pcmRms(data: Uint8Array): number {
+  if (data.byteLength < 2) return 0;
+  const aligned = new Uint8Array(data.byteLength);
+  aligned.set(data);
+  const samples = new Int16Array(aligned.buffer);
+  let energy = 0;
+  for (const sample of samples) energy += sample * sample;
+  return Math.sqrt(energy / samples.length);
 }
 
 export type RealtimeTranslationChannelFactory = () => RealtimeTranslationChannel;
@@ -66,15 +90,12 @@ export class RealtimeCapturePipeline {
   #latestCapturedAtUnixMs = 0;
   #cascadeBuffer: CascadeBuffer | undefined;
   #cascadeSequence = 0;
-  #cascadeProvisionalRevision = 0;
   #inputChain = Promise.resolve();
   #sourceTranscriptChain = Promise.resolve();
   #cascadeTranscriptChain = Promise.resolve();
-  #provisionalTranscriptChain = Promise.resolve();
   #translatedTranscriptChain = Promise.resolve();
-  #pendingProvisionalCascade: TranscriptSegment | undefined;
-  #provisionalTimer: ReturnType<typeof setTimeout> | undefined;
   #speechWindowActive = false;
+  #speechRmsBaseline = speechRmsThreshold;
   #silenceDurationMs = 0;
   #lastPauseCommitMs = 0;
   #started = false;
@@ -145,7 +166,14 @@ export class RealtimeCapturePipeline {
       endMs,
       sequence: this.#frameSequence++,
     };
-    this.#captureTimeline.push({ endMs, capturedAtUnixMs });
+    const rms = pcmRms(frame);
+    this.#captureTimeline.push({ startMs, endMs, capturedAtUnixMs, rms });
+    if (rms >= speechRmsThreshold) {
+      this.#speechRmsBaseline =
+        this.#speechRmsBaseline === speechRmsThreshold
+          ? rms
+          : this.#speechRmsBaseline * 0.97 + rms * 0.03;
+    }
     while (this.#captureTimeline.length > 1 && this.#captureTimeline[0]!.endMs < endMs - 120_000) {
       this.#captureTimeline.shift();
     }
@@ -159,7 +187,7 @@ export class RealtimeCapturePipeline {
             .filter(([channelId]) => this.#activeDirectChannelIds.has(channelId))
             .map(([, channel]) => channel.pushAudio(chunk)),
         ]);
-        this.#observeSourcePause(chunk);
+        this.#observeSourcePause(chunk, rms);
         await this.#flushCompleteSourceChunks(capturedAtUnixMs);
       })
       .catch((error) => {
@@ -177,15 +205,11 @@ export class RealtimeCapturePipeline {
     await this.#flushPendingSource();
     await Promise.allSettled([...this.#channels.values()].map((channel) => channel.stop()));
     await this.#transcriber.stop();
-    if (this.#provisionalTimer) clearTimeout(this.#provisionalTimer);
-    this.#provisionalTimer = undefined;
-    this.#pendingProvisionalCascade = undefined;
     for (const channelId of this.#transcriptBuffers.keys()) this.#flushTranscript(channelId);
     this.#flushCompletedCascadeAtStop();
     await Promise.all([
       this.#sourceTranscriptChain,
       this.#cascadeTranscriptChain,
-      this.#provisionalTranscriptChain,
       this.#translatedTranscriptChain,
       ...this.#audioChains.values(),
     ]);
@@ -238,8 +262,9 @@ export class RealtimeCapturePipeline {
       this.#receiveProvisionalSourceTranscript(segment);
       return;
     }
-    const completedAtUnixMs = Date.parse(segment.emittedAt);
-    const captureCompletedAtUnixMs = this.#captureTimestamp(segment.sourceEndMs);
+    const deliveredSegment = { ...segment, sourceDelivery: this.#sourceDelivery(segment) };
+    const completedAtUnixMs = Date.parse(deliveredSegment.emittedAt);
+    const captureCompletedAtUnixMs = this.#captureTimestamp(deliveredSegment.sourceEndMs);
     const timing = {
       ...(captureCompletedAtUnixMs !== undefined
         ? {
@@ -251,9 +276,10 @@ export class RealtimeCapturePipeline {
       transcription: {
         startedAtUnixMs:
           captureCompletedAtUnixMs ??
-          Date.parse(this.#session.startedAt ?? this.#session.createdAt) + segment.sourceEndMs,
-        ...(segment.firstDeltaAtUnixMs !== undefined
-          ? { firstDeltaAtUnixMs: segment.firstDeltaAtUnixMs }
+          Date.parse(this.#session.startedAt ?? this.#session.createdAt) +
+            deliveredSegment.sourceEndMs,
+        ...(deliveredSegment.firstDeltaAtUnixMs !== undefined
+          ? { firstDeltaAtUnixMs: deliveredSegment.firstDeltaAtUnixMs }
           : {}),
         completedAtUnixMs: Number.isFinite(completedAtUnixMs) ? completedAtUnixMs : Date.now(),
       },
@@ -262,7 +288,7 @@ export class RealtimeCapturePipeline {
     this.#sourceTranscriptChain = this.#sourceTranscriptChain
       .then(async () => {
         await this.#engine.ingestLiveTranscript(
-          segment,
+          deliveredSegment,
           timing,
           this.#activeDirectChannelIds,
           sourceChannelIds,
@@ -274,12 +300,7 @@ export class RealtimeCapturePipeline {
           error instanceof Error ? error : new Error(String(error)),
         );
       });
-    this.#queueProvisionalCascade({
-      ...segment,
-      phase: 'transcribing',
-      final: false,
-    });
-    this.#bufferCascadeTranscript(segment, timing);
+    this.#bufferCascadeTranscript(deliveredSegment, timing);
   }
 
   #receiveProvisionalSourceTranscript(segment: TranscriptSegment): void {
@@ -293,42 +314,6 @@ export class RealtimeCapturePipeline {
           error instanceof Error ? error : new Error(String(error)),
         );
       });
-
-    this.#queueProvisionalCascade(segment);
-  }
-
-  #queueProvisionalCascade(segment: TranscriptSegment): void {
-    const cascadeChannelIds = this.#cascadeChannelIds();
-    if (cascadeChannelIds.size === 0) return;
-    const finalizedPrefix = this.#cascadeBuffer?.segment;
-    const text = [finalizedPrefix?.text.trim(), segment.text.trim()].filter(Boolean).join(' ');
-    if (!text) return;
-    this.#pendingProvisionalCascade = {
-      ...segment,
-      id: `cascade-preview-${this.#cascadeSequence}`,
-      text,
-      sourceStartMs: finalizedPrefix?.sourceStartMs ?? segment.sourceStartMs,
-      sourceEndMs: Math.max(finalizedPrefix?.sourceEndMs ?? 0, segment.sourceEndMs),
-      sequence: this.#cascadeSequence,
-      revision: ++this.#cascadeProvisionalRevision,
-      phase: 'transcribing',
-      final: false,
-    };
-    this.#scheduleProvisionalTranslation(cascadeChannelIds);
-  }
-
-  #scheduleProvisionalTranslation(channelIds: ReadonlySet<string>): void {
-    if (this.#provisionalTimer) return;
-    this.#provisionalTimer = setTimeout(() => {
-      this.#provisionalTimer = undefined;
-      this.#provisionalTranscriptChain = this.#provisionalTranscriptChain
-        .then(async () => {
-          const latest = this.#pendingProvisionalCascade;
-          this.#pendingProvisionalCascade = undefined;
-          if (latest) await this.#engine.ingestProvisionalLiveTranscript(latest, channelIds);
-        })
-        .catch(() => undefined);
-    }, provisionalTranslationIntervalMs);
   }
 
   #bufferCascadeTranscript(
@@ -359,11 +344,15 @@ export class RealtimeCapturePipeline {
     const buffered = this.#cascadeBuffer?.segment;
     if (!buffered) return;
     const boundary = lastSentenceBoundary(buffered.text);
-    if (boundary > 0) {
+    const durationMs = buffered.sourceEndMs - buffered.sourceStartMs;
+    const boundaryDurationMs = Math.round(
+      durationMs * Math.min(1, boundary / Math.max(1, buffered.text.length)),
+    );
+    if (boundary > 0 && isNarrationReady(buffered.text.slice(0, boundary), boundaryDurationMs)) {
       this.#flushCascadeSentence(boundary);
     } else if (
       (segment.sourcePauseAfterMs ?? 0) >= sourcePauseCommitMs &&
-      buffered.sourceEndMs - buffered.sourceStartMs >= minimumSpeechWindowMs
+      isNarrationReady(buffered.text, durationMs)
     ) {
       this.#flushCascadeTranscript();
     } else if (buffered.sourceEndMs - buffered.sourceStartMs >= expressiveMaximumWindowMs) {
@@ -424,10 +413,14 @@ export class RealtimeCapturePipeline {
     this.#cascadeSequence += 1;
     const cascadeChannelIds = this.#cascadeChannelIds();
     if (cascadeChannelIds.size === 0) return;
+    const deliveredSegment = {
+      ...buffered.segment,
+      sourceDelivery: this.#sourceDelivery(buffered.segment),
+    };
     this.#cascadeTranscriptChain = this.#cascadeTranscriptChain
       .then(async () => {
         await this.#engine.ingestLiveTranscript(
-          buffered.segment,
+          deliveredSegment,
           buffered.timing,
           this.#activeDirectChannelIds,
           cascadeChannelIds,
@@ -454,14 +447,8 @@ export class RealtimeCapturePipeline {
     );
   }
 
-  #observeSourcePause(chunk: AudioChunk): void {
+  #observeSourcePause(chunk: AudioChunk, rms: number): void {
     if (chunk.encoding !== 'pcm_s16le' || chunk.data.byteLength < 2) return;
-    const aligned = new Uint8Array(chunk.data.byteLength);
-    aligned.set(chunk.data);
-    const samples = new Int16Array(aligned.buffer);
-    let energy = 0;
-    for (const sample of samples) energy += sample * sample;
-    const rms = Math.sqrt(energy / samples.length);
     const durationMs = Math.max(0, chunk.endMs - chunk.startMs);
     if (rms >= speechRmsThreshold) {
       this.#speechWindowActive = true;
@@ -497,6 +484,37 @@ export class RealtimeCapturePipeline {
     const point = this.#captureTimeline.find((candidate) => candidate.endMs >= sourceEndMs);
     if (!point) return undefined;
     return Math.round(point.capturedAtUnixMs - Math.max(0, point.endMs - sourceEndMs));
+  }
+
+  #sourceDelivery(segment: TranscriptSegment): SourceDelivery {
+    const points = this.#captureTimeline.filter(
+      (point) => point.endMs > segment.sourceStartMs && point.startMs < segment.sourceEndMs,
+    );
+    const speech = points.filter((point) => point.rms >= speechRmsThreshold);
+    const averageRms =
+      speech.length > 0
+        ? speech.reduce((sum, point) => sum + point.rms, 0) / speech.length
+        : this.#speechRmsBaseline;
+    const energyRatio = averageRms / Math.max(speechRmsThreshold, this.#speechRmsBaseline);
+    const durationSeconds = Math.max(0.25, (segment.sourceEndMs - segment.sourceStartMs) / 1_000);
+    const wordsPerSecond = wordCount(segment.text) / durationSeconds;
+    const terminal = segment.text.trim();
+    return {
+      pace: wordsPerSecond < 1.9 ? 'measured' : wordsPerSecond > 3.2 ? 'animated' : 'steady',
+      energy:
+        /!["'»”)]*$/u.test(terminal) || energyRatio > 1.3
+          ? 'emphatic'
+          : energyRatio < 0.72
+            ? 'soft'
+            : 'balanced',
+      contour: /\?["'»”)]*$/u.test(terminal)
+        ? 'question'
+        : /!["'»”)]*$/u.test(terminal)
+          ? 'exclamation'
+          : /(?:[,;:…]|—|–|-)["'»”)]*$/u.test(terminal) || !/[.!?]["'»”)]*$/u.test(terminal)
+            ? 'continuation'
+            : 'statement',
+    };
   }
 
   #receiveTranslatedDelta(delta: RealtimeTranscriptDelta): void {

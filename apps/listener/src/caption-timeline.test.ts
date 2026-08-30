@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { TranscriptSegment } from '@multilinguum/protocol';
-import { captionWordState, mergeCaption } from './caption-timeline';
+import {
+  captionWordState,
+  mergeCaption,
+  narratedAnchorSequence,
+  visibleCaptionSegments,
+} from './caption-timeline';
 
 function segment(input: Partial<TranscriptSegment> = {}): TranscriptSegment {
   return {
@@ -39,5 +44,30 @@ describe('listener caption timeline', () => {
     expect(captionWordState(1_000, 1_500, 999)).toBe('future');
     expect(captionWordState(1_000, 1_500, 1_250)).toBe('current');
     expect(captionWordState(1_000, 1_500, 1_500)).toBe('spoken');
+  });
+
+  it('reveals only near-future text and anchors scrolling to audio that has begun', () => {
+    const captions = [
+      segment({
+        sequence: 0,
+        final: true,
+        playout: { startAtUnixMs: 1_000, endAtUnixMs: 2_000, words: [] },
+      }),
+      segment({
+        sequence: 1,
+        final: true,
+        playout: { startAtUnixMs: 3_000, endAtUnixMs: 4_000, words: [] },
+      }),
+      segment({
+        sequence: 2,
+        final: true,
+        playout: { startAtUnixMs: 9_000, endAtUnixMs: 10_000, words: [] },
+      }),
+    ];
+
+    expect(visibleCaptionSegments(captions, 2_500).map((item) => item.sequence)).toEqual([0, 1]);
+    expect(narratedAnchorSequence(captions, 1_500)).toBe(0);
+    expect(narratedAnchorSequence(captions, 2_500)).toBe(0);
+    expect(narratedAnchorSequence(captions, 3_500)).toBe(1);
   });
 });

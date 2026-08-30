@@ -181,10 +181,18 @@ export interface TranscriptSegment {
   phase?: 'transcribing' | 'translating' | 'queued';
   /** A source-audio pause detected immediately after this segment. */
   sourcePauseAfterMs?: number | undefined;
+  /** Coarse source delivery cues used to steer generic speech without copying a voice. */
+  sourceDelivery?: SourceDelivery | undefined;
   /** Server-clock schedule for the audio listeners actually hear. */
   playout?: CaptionPlayoutTiming;
   final: boolean;
   sequence: number;
+}
+
+export interface SourceDelivery {
+  pace: 'measured' | 'steady' | 'animated';
+  energy: 'soft' | 'balanced' | 'emphatic';
+  contour: 'statement' | 'question' | 'continuation' | 'exclamation';
 }
 
 export interface CaptionWordTiming {

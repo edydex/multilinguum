@@ -284,7 +284,12 @@ export class SessionEngine {
     };
     const results = await Promise.all(
       [...this.#channels.values()]
-        .filter((runtime) => onlyChannelIds.has(runtime.config.id) && !runtime.config.muted)
+        .filter(
+          (runtime) =>
+            onlyChannelIds.has(runtime.config.id) &&
+            !runtime.config.muted &&
+            runtime.config.voiceMode === 'source',
+        )
         .map(async (runtime) => {
           const revision = normalized.revision ?? 0;
           if (
@@ -297,37 +302,11 @@ export class SessionEngine {
           ) {
             return undefined;
           }
-          let provisional: TranscriptSegment;
-          if (runtime.config.voiceMode === 'source') {
-            provisional = {
-              ...normalized,
-              channelId: runtime.config.id,
-              phase: 'transcribing',
-            };
-          } else {
-            const translated = await this.#translationProvider(runtime.config).translate(
-              normalized,
-              {
-                sourceLanguage: session.sourceLanguage,
-                targetLanguage: runtime.config.targetLanguage,
-                glossary: defaultGlossary[runtime.config.targetLanguage],
-                precedingText: runtime.precedingText,
-                sermonNotes: await this.#dependencies.context.retrieve(
-                  session.contextDocumentIds,
-                  normalized.text,
-                ),
-              },
-            );
-            provisional = {
-              ...translated,
-              sessionId: session.id,
-              channelId: runtime.config.id,
-              sequence: normalized.sequence,
-              revision,
-              phase: 'translating',
-              final: false,
-            };
-          }
+          const provisional: TranscriptSegment = {
+            ...normalized,
+            channelId: runtime.config.id,
+            phase: 'transcribing',
+          };
           if (normalized.sequence <= runtime.lastFinalCaptionSequence) return undefined;
           if (
             normalized.sequence < runtime.lastProvisionalSequence ||
@@ -594,16 +573,6 @@ export class SessionEngine {
         finalCaption.sequence,
       );
       await this.#dependencies.archive.appendTranscript(finalCaption);
-      const captionStartedAtUnixMs = Date.now();
-      await this.#dependencies.relay.publishCaption(
-        runtime.effectiveVoiceMode === 'source'
-          ? finalCaption
-          : { ...finalCaption, phase: 'translating', final: false },
-      );
-      captionPublish = {
-        startedAtUnixMs: captionStartedAtUnixMs,
-        completedAtUnixMs: Date.now(),
-      };
 
       if (runtime.effectiveVoiceMode !== 'source') {
         this.#enqueueSpeech({
@@ -612,25 +581,33 @@ export class SessionEngine {
           translated: finalCaption,
           sourceTiming,
           translation,
-          provisionalCaptionPublish: captionPublish,
         });
         const now = new Date().toISOString();
+        const transcriptLatencyMs = Math.max(
+          0,
+          sourceTiming?.captureCompletedAtUnixMs === undefined
+            ? backlogMs
+            : (translation?.completedAtUnixMs ?? Date.now()) -
+                sourceTiming.captureCompletedAtUnixMs,
+        );
         runtime.health = {
           ...runtime.health,
           state: 'healthy',
           lastTranscriptAt: now,
-          latencyMs: Math.max(
-            0,
-            sourceTiming?.captureCompletedAtUnixMs === undefined
-              ? backlogMs
-              : captionPublish.completedAtUnixMs - sourceTiming.captureCompletedAtUnixMs,
-          ),
+          latencyMs: transcriptLatencyMs,
           backlogMs: this.#playbackBacklogMs(runtime),
           engine: `${this.#translationProvider(runtime.config).name}+${runtime.effectiveVoiceMode}`,
         };
         this.#emitHealth(runtime);
         return finalCaption;
       }
+
+      const captionStartedAtUnixMs = Date.now();
+      await this.#dependencies.relay.publishCaption(finalCaption);
+      captionPublish = {
+        startedAtUnixMs: captionStartedAtUnixMs,
+        completedAtUnixMs: Date.now(),
+      };
 
       const sample = this.#latencySample({
         runtime,
@@ -704,7 +681,6 @@ export class SessionEngine {
     translated: TranscriptSegment;
     sourceTiming?: SourceProcessingTiming | undefined;
     translation?: LatencySpan | undefined;
-    provisionalCaptionPublish: LatencySpan;
   }): void {
     const session = this.#requiredSession();
     const estimateMs = estimateSpeechDurationMs(input.translated.text);
@@ -713,6 +689,7 @@ export class SessionEngine {
     const renderStartedAtUnixMs = Date.now();
     const renderPromise = this.#render(input.runtime, input.translated, {
       playbackBacklogMs,
+      sourceDelivery: input.source.sourceDelivery,
     }).then(
       (rendered) => ({
         ok: true as const,
@@ -734,6 +711,7 @@ export class SessionEngine {
 
     input.runtime.audioChain = input.runtime.audioChain.then(async () => {
       let speechRender: LatencySpan | undefined;
+      let captionPublish: LatencySpan | undefined;
       let audioPublish: LatencySpan | undefined;
       let playout: LatencySpan | undefined;
       let speechRenderer: string | undefined;
@@ -762,7 +740,12 @@ export class SessionEngine {
             words: buildCaptionWordTimings(input.translated.text, spokenDurationMs),
           },
         };
+        const captionStartedAtUnixMs = Date.now();
         await this.#dependencies.relay.publishCaption(queuedCaption);
+        captionPublish = {
+          startedAtUnixMs: captionStartedAtUnixMs,
+          completedAtUnixMs: Date.now(),
+        };
         await this.#dependencies.relay.publishAudio(input.runtime.config.id, result.rendered);
         audioPublish = {
           startedAtUnixMs: audioStartedAtUnixMs,
@@ -782,7 +765,7 @@ export class SessionEngine {
           sourceTiming: input.sourceTiming,
           translation: input.translation,
           speechRender,
-          captionPublish: input.provisionalCaptionPublish,
+          captionPublish,
           audioPublish,
           playout,
           speechRenderer,
@@ -819,7 +802,7 @@ export class SessionEngine {
           sourceTiming: input.sourceTiming,
           translation: input.translation,
           speechRender,
-          captionPublish: input.provisionalCaptionPublish,
+          captionPublish,
           audioPublish,
           playout,
           speechRenderer,

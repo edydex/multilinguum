@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RemoteAudioTrack, Room } from 'livekit-client';
 import type {
   Language,
@@ -6,7 +6,13 @@ import type {
   PublicServiceState,
   TranscriptSegment,
 } from '@multilinguum/protocol';
-import { captionWordState, mergeCaption, type CaptionTimeline } from './caption-timeline';
+import {
+  captionWordState,
+  mergeCaption,
+  narratedAnchorSequence,
+  visibleCaptionSegments,
+  type CaptionTimeline,
+} from './caption-timeline';
 
 const names: Record<Language, string> = {
   en: 'English',
@@ -68,7 +74,10 @@ export function App() {
   const audioRef = useRef<HTMLAudioElement | undefined>(undefined);
   const tracksRef = useRef(new Map<Language, RemoteAudioTrack>());
   const captionViewportRef = useRef<HTMLDivElement | null>(null);
+  const captionSegmentRefs = useRef(new Map<number, HTMLElement>());
   const followingLiveRef = useRef(true);
+  const programmaticScrollRef = useRef(false);
+  const programmaticScrollTimerRef = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     const load = async () => {
@@ -220,37 +229,66 @@ export function App() {
 
   const selectedChannel = service.languages.find((item) => item.language === language);
   const caption = language ? captions[language] : undefined;
-  const captionRevision = `${caption?.final.length ?? 0}:${caption?.live?.sequence ?? -1}:${caption?.live?.revision ?? -1}:${caption?.live?.text.length ?? 0}`;
+  const visibleFinal = useMemo(
+    () => visibleCaptionSegments(caption?.final ?? [], captionClock),
+    [caption?.final, captionClock],
+  );
+  const narratedSequence = useMemo(
+    () => narratedAnchorSequence(visibleFinal, captionClock),
+    [captionClock, visibleFinal],
+  );
+
+  const scrollToNarrated = useCallback(
+    (behavior: ScrollBehavior) => {
+      const viewport = captionViewportRef.current;
+      if (!viewport) return;
+      const target =
+        narratedSequence === undefined
+          ? undefined
+          : captionSegmentRefs.current.get(narratedSequence);
+      const top = target
+        ? Math.max(0, target.offsetTop - viewport.clientHeight * 0.42)
+        : viewport.scrollHeight;
+      programmaticScrollRef.current = true;
+      if (programmaticScrollTimerRef.current !== undefined) {
+        window.clearTimeout(programmaticScrollTimerRef.current);
+      }
+      viewport.scrollTo({ top, behavior });
+      programmaticScrollTimerRef.current = window.setTimeout(
+        () => {
+          programmaticScrollRef.current = false;
+        },
+        behavior === 'smooth' ? 450 : 50,
+      );
+    },
+    [narratedSequence],
+  );
 
   useLayoutEffect(() => {
-    const viewport = captionViewportRef.current;
-    if (!viewport || !followingLiveRef.current) return;
-    viewport.scrollTop = viewport.scrollHeight;
-  }, [captionRevision, captionsVisible, language]);
+    if (!followingLiveRef.current) return;
+    scrollToNarrated('smooth');
+  }, [captionsVisible, language, narratedSequence, scrollToNarrated]);
 
   useEffect(() => {
     followingLiveRef.current = true;
     setFollowingLive(true);
-    window.requestAnimationFrame(() => {
-      const viewport = captionViewportRef.current;
-      if (viewport) viewport.scrollTop = viewport.scrollHeight;
-    });
   }, [language]);
 
   const updateCaptionFollow = () => {
     const viewport = captionViewportRef.current;
-    if (!viewport) return;
+    if (!viewport || programmaticScrollRef.current) return;
     const atBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 36;
     followingLiveRef.current = atBottom;
     setFollowingLive(atBottom);
   };
 
   const jumpToLive = () => {
-    const viewport = captionViewportRef.current;
-    if (!viewport) return;
     followingLiveRef.current = true;
     setFollowingLive(true);
-    viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+    scrollToNarrated('smooth');
+  };
+  const beginManualCaptionScroll = () => {
+    programmaticScrollRef.current = false;
   };
   const status = useMemo(() => {
     if (!service.active) return 'Service offline';
@@ -338,12 +376,21 @@ export function App() {
                 className="caption-viewport"
                 ref={captionViewportRef}
                 onScroll={updateCaptionFollow}
+                onPointerDown={beginManualCaptionScroll}
+                onWheel={beginManualCaptionScroll}
               >
                 <div className="caption-copy" aria-live="polite">
-                  {caption?.final.map((segment) => (
-                    <p className="caption-final" key={`${segment.sessionId}-${segment.sequence}`}>
-                      <CaptionWords segment={segment} now={captionClock} />
-                    </p>
+                  {visibleFinal.map((segment) => (
+                    <span
+                      className="caption-final"
+                      key={`${segment.sessionId}-${segment.sequence}`}
+                      ref={(element) => {
+                        if (element) captionSegmentRefs.current.set(segment.sequence, element);
+                        else captionSegmentRefs.current.delete(segment.sequence);
+                      }}
+                    >
+                      <CaptionWords segment={segment} now={captionClock} />{' '}
+                    </span>
                   ))}
                   {!caption?.final.length && !caption?.live ? (
                     <span className="caption-placeholder">

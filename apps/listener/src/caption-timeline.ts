@@ -44,3 +44,32 @@ export function captionWordState(
   if (now < endAtUnixMs) return 'current';
   return 'spoken';
 }
+
+export function visibleCaptionSegments(
+  segments: TranscriptSegment[],
+  now: number,
+  leadMs = 1_800,
+): TranscriptSegment[] {
+  return segments.filter(
+    (segment) => !segment.playout || segment.playout.startAtUnixMs <= now + leadMs,
+  );
+}
+
+/** The latest caption whose audio has actually begun, never merely the newest queued text. */
+export function narratedAnchorSequence(
+  segments: TranscriptSegment[],
+  now: number,
+): number | undefined {
+  let anchor: number | undefined;
+  for (const segment of segments) {
+    if (!segment.playout || segment.playout.startAtUnixMs <= now) anchor = segment.sequence;
+    if (
+      segment.playout &&
+      segment.playout.startAtUnixMs <= now &&
+      segment.playout.endAtUnixMs > now
+    ) {
+      return segment.sequence;
+    }
+  }
+  return anchor;
+}

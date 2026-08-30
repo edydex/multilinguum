@@ -361,13 +361,15 @@ describe('RealtimeCapturePipeline', () => {
     expect(transcriber.flushes).toEqual([400]);
   });
 
-  it('keeps the finalized recognition window available for immediate provisional translation', async () => {
-    vi.useFakeTimers();
-    const previews: TranscriptSegment[] = [];
+  it('publishes live recognition only to the source channel, not translated channels', async () => {
+    const previews: Array<{ segment: TranscriptSegment; channels: Set<string> }> = [];
     const engine = {
       ingestSourceAudio: async () => undefined,
-      ingestProvisionalLiveTranscript: async (segment: TranscriptSegment) => {
-        previews.push(segment);
+      ingestProvisionalLiveTranscript: async (
+        segment: TranscriptSegment,
+        channels: Set<string>,
+      ) => {
+        previews.push({ segment, channels });
         return [];
       },
       ingestLiveTranscript: async () => [],
@@ -392,10 +394,68 @@ describe('RealtimeCapturePipeline', () => {
       sequence: 0,
     };
     transcriber.emit({ ...base, text: 'Благодать вам', revision: 1, final: false });
-    transcriber.emit({ ...base, text: 'Благодать вам и мир', final: true });
-    await vi.advanceTimersByTimeAsync(301);
-
-    expect(previews.some((preview) => preview.text === 'Благодать вам и мир')).toBe(true);
     await pipeline.close();
+
+    expect(previews).toEqual([
+      {
+        segment: expect.objectContaining({ text: 'Благодать вам', final: false }),
+        channels: new Set(['channel-ru']),
+      },
+    ]);
+  });
+
+  it('holds an isolated emphasized word and narrates it with the following thought', async () => {
+    const calls: unknown[][] = [];
+    const engine = {
+      ingestSourceAudio: async () => undefined,
+      ingestLiveTranscript: async (...input: unknown[]) => {
+        calls.push(input);
+        return [];
+      },
+      reportChannelFailure: () => undefined,
+    } as unknown as SessionEngine;
+    const transcriber = new FakeTranscriber();
+    const pipeline = new RealtimeCapturePipeline(
+      engine,
+      cascadeSession(),
+      transcriber,
+      () => new FakeTranslationChannel(),
+    );
+    await pipeline.start();
+    const base = {
+      sessionId: 'session-live-test',
+      channelId: 'source-ru',
+      language: 'ru' as const,
+      emittedAt: new Date().toISOString(),
+      final: true,
+    };
+    transcriber.emit({
+      ...base,
+      id: 'emphasis',
+      text: 'Только.',
+      sourceStartMs: 0,
+      sourceEndMs: 1_400,
+      sourcePauseAfterMs: 420,
+      sequence: 0,
+    });
+    transcriber.emit({
+      ...base,
+      id: 'thought',
+      text: 'Бог может сохранить нас.',
+      sourceStartMs: 1_400,
+      sourceEndMs: 3_800,
+      sequence: 1,
+    });
+    await pipeline.close();
+
+    const cascadeCall = calls.find((call) => (call[3] as Set<string>).has('channel-en'));
+    expect(cascadeCall?.[0]).toEqual(
+      expect.objectContaining({
+        text: 'Только. Бог может сохранить нас.',
+        sourceStartMs: 0,
+        sourceEndMs: 3_800,
+        sourceDelivery: expect.any(Object),
+      }),
+    );
   });
 });

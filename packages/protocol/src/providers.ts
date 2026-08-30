@@ -5,6 +5,7 @@ import type {
   PipelineLatencySample,
   ServiceSession,
   TranscriptSegment,
+  SourceDelivery,
   VoiceProfile,
 } from './types.js';
 
@@ -33,6 +34,8 @@ export interface TranslationContext {
 export interface SpeechRenderContext {
   /** Audio already queued or being rendered ahead of this clause. */
   playbackBacklogMs: number;
+  /** Coarse delivery cues measured from the corresponding source-audio clause. */
+  sourceDelivery?: SourceDelivery | undefined;
 }
 
 export interface Transcriber {

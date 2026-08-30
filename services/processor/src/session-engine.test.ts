@@ -58,7 +58,7 @@ class DeferredSpeech implements SpeechRenderer {
 }
 
 describe('SessionEngine look-ahead speech queue', () => {
-  it('renders ahead, publishes in sequence, and promotes live captions to final', async () => {
+  it('renders ahead, publishes in sequence, and reveals captions only with queued audio', async () => {
     const captions: TranscriptSegment[] = [];
     const audio: RenderedSpeech[] = [];
     const transcripts: TranscriptSegment[] = [];
@@ -198,7 +198,7 @@ describe('SessionEngine look-ahead speech queue', () => {
       captions
         .filter((segment) => segment.channelId === 'channel-en' && !segment.final)
         .map((segment) => segment.sequence),
-    ).toEqual([0, 0, 1]);
+    ).toEqual([]);
 
     renderer.resolve(1);
     renderer.resolve(0);
