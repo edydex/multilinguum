@@ -92,9 +92,10 @@ export class OpenAINaturalSpeechRenderer implements SpeechRenderer {
       speed,
       instructions:
         'Warm, clear church interpretation at a calm, natural speaking pace. Speak the complete ' +
-        'thought fluidly, honor its punctuation and emphasis without dramatizing, and do not rush ' +
-        'to match the source speaker. Begin promptly and avoid a long silent tail; adjacent clauses ' +
-        'will be joined into one continuous program.',
+        'thought fluidly, honor its punctuation and emphasis without dramatizing, and allow a ' +
+        'brief natural breath at an internal comma or dash. Do not rush to match the source ' +
+        'speaker. Begin promptly and avoid a long silent tail; adjacent clauses will be joined ' +
+        'into one continuous program.',
     });
     const pcm24k = new Int16Array(await response.arrayBuffer());
     const pcm48k = new Int16Array(pcm24k.length * 2);
@@ -129,7 +130,7 @@ export class OpenAINaturalSpeechRenderer implements SpeechRenderer {
  * sustained 20-second queue and remains subtle enough to avoid a rushed voice.
  */
 export function naturalSpeechSpeed(playbackBacklogMs: number): number {
-  if (playbackBacklogMs < 20_000) return 0.98;
+  if (playbackBacklogMs < 20_000) return 0.96;
   if (playbackBacklogMs < 30_000) return 1.03;
   if (playbackBacklogMs < 45_000) return 1.07;
   return 1.12;

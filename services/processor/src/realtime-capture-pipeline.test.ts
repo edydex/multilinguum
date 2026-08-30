@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   AudioChunk,
   ChannelConfig,
@@ -15,6 +15,7 @@ import type { SessionEngine } from './session-engine.js';
 class FakeTranscriber implements Transcriber {
   readonly name = 'fake-live-transcriber';
   readonly pushed: AudioChunk[] = [];
+  readonly flushes: Array<number | undefined> = [];
   readonly #listeners = new Set<(segment: TranscriptSegment) => void>();
   started = false;
 
@@ -24,6 +25,10 @@ class FakeTranscriber implements Transcriber {
 
   async pushAudio(chunk: AudioChunk): Promise<void> {
     this.pushed.push(chunk);
+  }
+
+  flushAudio(sourcePauseAfterMs?: number): void {
+    this.flushes.push(sourcePauseAfterMs);
   }
 
   async stop(): Promise<void> {
@@ -146,6 +151,8 @@ function cascadeSession(): ServiceSession {
 }
 
 describe('RealtimeCapturePipeline', () => {
+  afterEach(() => vi.useRealTimers());
+
   it('fans capture to one shared transcriber and direct target, then normalizes outputs', async () => {
     const sourceAudio: unknown[] = [];
     const sourceTranscripts: unknown[] = [];
@@ -329,5 +336,66 @@ describe('RealtimeCapturePipeline', () => {
       .filter((call) => (call[3] as Set<string>).has('channel-en'))
       .map((call) => (call[0] as TranscriptSegment).text);
     expect(cascadeTexts).toEqual(['Кротость — это внешняя реакция.']);
+  });
+
+  it('commits transcription at a real mixer pause', async () => {
+    const engine = {
+      ingestSourceAudio: async () => undefined,
+      ingestLiveTranscript: async () => [],
+      reportChannelFailure: () => undefined,
+    } as unknown as SessionEngine;
+    const transcriber = new FakeTranscriber();
+    const pipeline = new RealtimeCapturePipeline(
+      engine,
+      cascadeSession(),
+      transcriber,
+      () => new FakeTranslationChannel(),
+    );
+    await pipeline.start();
+    const speech = new Int16Array(48_000);
+    speech.fill(1_000);
+    pipeline.push(new Uint8Array(speech.buffer));
+    pipeline.push(new Uint8Array(48_000 * 0.4 * 2));
+    await pipeline.close();
+
+    expect(transcriber.flushes).toEqual([400]);
+  });
+
+  it('keeps the finalized recognition window available for immediate provisional translation', async () => {
+    vi.useFakeTimers();
+    const previews: TranscriptSegment[] = [];
+    const engine = {
+      ingestSourceAudio: async () => undefined,
+      ingestProvisionalLiveTranscript: async (segment: TranscriptSegment) => {
+        previews.push(segment);
+        return [];
+      },
+      ingestLiveTranscript: async () => [],
+      reportChannelFailure: () => undefined,
+    } as unknown as SessionEngine;
+    const transcriber = new FakeTranscriber();
+    const pipeline = new RealtimeCapturePipeline(
+      engine,
+      cascadeSession(),
+      transcriber,
+      () => new FakeTranslationChannel(),
+    );
+    await pipeline.start();
+    const base = {
+      id: 'dynamic-source',
+      sessionId: 'session-live-test',
+      channelId: 'source-ru',
+      language: 'ru' as const,
+      sourceStartMs: 0,
+      sourceEndMs: 2_500,
+      emittedAt: new Date().toISOString(),
+      sequence: 0,
+    };
+    transcriber.emit({ ...base, text: 'Благодать вам', revision: 1, final: false });
+    transcriber.emit({ ...base, text: 'Благодать вам и мир', final: true });
+    await vi.advanceTimersByTimeAsync(301);
+
+    expect(previews.some((preview) => preview.text === 'Благодать вам и мир')).toBe(true);
+    await pipeline.close();
   });
 });

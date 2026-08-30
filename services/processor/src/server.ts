@@ -65,6 +65,7 @@ function publicState(config: ProcessorConfig, engine: SessionEngine): PublicServ
   const active = session?.state === 'live';
   return {
     active,
+    serverTimeUnixMs: Date.now(),
     churchName: config.CHURCH_NAME,
     ...(active && session
       ? {
@@ -107,10 +108,38 @@ export async function buildServer(config: ProcessorConfig) {
 
   const operatorSockets = new Set<WebSocket>();
   const publicSockets = new Set<WebSocket>();
-  const lastCaptions = new Map<string, ProcessorEvent>();
+  const captionHistory = new Map<string, Array<Extract<ProcessorEvent, { type: 'transcript' }>>>();
+  let captionSessionId: string | undefined;
   const broadcast = (event: ProcessorEvent) => {
     const payload = JSON.stringify(event);
-    if (event.type === 'transcript') lastCaptions.set(event.segment.channelId, event);
+    if (event.type === 'session' && event.session.id !== captionSessionId) {
+      captionHistory.clear();
+      captionSessionId = event.session.id;
+    }
+    if (event.type === 'transcript') {
+      if (event.segment.sessionId !== captionSessionId) {
+        captionHistory.clear();
+        captionSessionId = event.segment.sessionId;
+      }
+      const existing = captionHistory.get(event.segment.channelId) ?? [];
+      const retained = existing.filter((candidate) => {
+        if (candidate.segment.sequence !== event.segment.sequence) {
+          return event.segment.final || candidate.segment.final;
+        }
+        return false;
+      });
+      retained.push(event);
+      const finals = retained.filter((candidate) => candidate.segment.final).slice(-80);
+      const latestLive = retained
+        .filter((candidate) => !candidate.segment.final)
+        .sort(
+          (left, right) =>
+            left.segment.sequence - right.segment.sequence ||
+            (left.segment.revision ?? 0) - (right.segment.revision ?? 0),
+        )
+        .at(-1);
+      captionHistory.set(event.segment.channelId, latestLive ? [...finals, latestLive] : finals);
+    }
     for (const socket of operatorSockets) {
       if (socket.readyState === socket.OPEN) socket.send(payload);
     }
@@ -254,7 +283,9 @@ export async function buildServer(config: ProcessorConfig) {
   app.get('/api/public/events', { websocket: true }, (socket) => {
     publicSockets.add(socket);
     socket.send(JSON.stringify({ type: 'public-state', state: publicState(config, engine) }));
-    for (const event of lastCaptions.values()) socket.send(JSON.stringify(event));
+    for (const events of captionHistory.values()) {
+      for (const event of events) socket.send(JSON.stringify(event));
+    }
     socket.on('close', () => publicSockets.delete(socket));
   });
 

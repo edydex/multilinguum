@@ -1,7 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { RenderedSpeech } from '@multilinguum/protocol';
 import { naturalSpeechSpeed } from './providers/openai-cascade.js';
-import { prepareSpeechForContinuousPlayout, speechDurationMs } from './speech-continuity.js';
+import {
+  buildCaptionWordTimings,
+  prepareSpeechForContinuousPlayout,
+  speechDurationMs,
+} from './speech-continuity.js';
 
 function speech(samples: Int16Array): RenderedSpeech {
   return {
@@ -30,10 +34,25 @@ describe('continuous speech preparation', () => {
   });
 
   it('does not accelerate routine queues and applies only gentle emergency catch-up', () => {
-    expect(naturalSpeechSpeed(0)).toBe(0.98);
-    expect(naturalSpeechSpeed(19_999)).toBe(0.98);
+    expect(naturalSpeechSpeed(0)).toBe(0.96);
+    expect(naturalSpeechSpeed(19_999)).toBe(0.96);
     expect(naturalSpeechSpeed(20_000)).toBe(1.03);
     expect(naturalSpeechSpeed(32_000)).toBe(1.07);
     expect(naturalSpeechSpeed(60_000)).toBe(1.12);
+  });
+
+  it('retains a bounded source pause and aligns every caption word to measured speech', () => {
+    const samples = new Int16Array(48_000 * 3);
+    for (let index = 48_000; index < 48_000 * 2; index += 1) {
+      samples[index] = index % 2 === 0 ? 4_000 : -4_000;
+    }
+    const prepared = prepareSpeechForContinuousPlayout(speech(samples), 600);
+    expect(speechDurationMs(prepared)).toBeGreaterThanOrEqual(1_480);
+    expect(speechDurationMs(prepared)).toBeLessThanOrEqual(1_510);
+
+    const words = buildCaptionWordTimings('Grace to you, and peace.', 1_300);
+    expect(words.map((word) => word.text)).toEqual(['Grace', 'to', 'you,', 'and', 'peace.']);
+    expect(words[0]?.startOffsetMs).toBe(0);
+    expect(words.at(-1)?.endOffsetMs).toBe(1_300);
   });
 });

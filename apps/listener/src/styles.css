@@ -26,7 +26,7 @@ main {
   width: min(680px, 100%);
   min-height: 100vh;
   margin: 0 auto;
-  padding: max(18px, env(safe-area-inset-top)) 20px max(24px, env(safe-area-inset-bottom));
+  padding: max(12px, env(safe-area-inset-top)) 18px max(18px, env(safe-area-inset-bottom));
   display: flex;
   flex-direction: column;
 }
@@ -53,18 +53,18 @@ main {
 }
 header {
   text-align: center;
-  margin: 28px 0 30px;
+  margin: 14px 0 16px;
 }
 .church-mark {
-  width: 48px;
-  height: 48px;
-  margin: 0 auto 12px;
+  width: 36px;
+  height: 36px;
+  margin: 0 auto 7px;
   display: grid;
   place-items: center;
   border-radius: 50%;
   color: #fff;
   background: #17352d;
-  font-size: 20px;
+  font-size: 15px;
 }
 header p {
   margin: 0;
@@ -72,9 +72,9 @@ header p {
   font-size: 13px;
 }
 h1 {
-  margin: 5px 0 7px;
+  margin: 2px 0 4px;
   font-family: Georgia, serif;
-  font-size: clamp(34px, 8vw, 48px);
+  font-size: clamp(28px, 7vw, 40px);
   font-weight: 500;
 }
 .delay {
@@ -91,7 +91,7 @@ h1 {
 .language-picker button {
   border: 0;
   border-radius: 12px;
-  padding: 12px 4px;
+  padding: 9px 4px;
   color: #67716c;
   background: transparent;
   cursor: pointer;
@@ -116,21 +116,21 @@ h1 {
   opacity: 0.35;
 }
 .player {
-  margin-top: 18px;
-  padding: 28px 24px 20px;
+  margin-top: 10px;
+  padding: 14px 20px 12px;
   color: #fff;
   background: #172f29;
-  border-radius: 24px;
+  border-radius: 20px;
   box-shadow: 0 20px 45px rgba(24, 49, 42, 0.22);
   text-align: center;
 }
 .wave {
-  height: 48px;
+  height: 28px;
   display: flex;
   justify-content: center;
   align-items: center;
   gap: 5px;
-  margin-bottom: 18px;
+  margin-bottom: 10px;
 }
 .wave i {
   display: block;
@@ -142,7 +142,7 @@ h1 {
 .listen {
   min-width: 180px;
   border: 0;
-  padding: 16px 26px;
+  padding: 12px 24px;
   border-radius: 999px;
   color: #18302a;
   background: #f4c963;
@@ -154,7 +154,7 @@ h1 {
   opacity: 0.5;
 }
 .volume {
-  margin: 22px auto 0;
+  margin: 12px auto 0;
   max-width: 300px;
   display: grid;
   grid-template-columns: auto 1fr;
@@ -170,7 +170,7 @@ h1 {
   width: 100%;
 }
 .stream-status {
-  margin-top: 16px;
+  margin-top: 9px;
   color: #9eada7;
   font-size: 10px;
 }
@@ -186,9 +186,8 @@ h1 {
   background: #51c38d;
 }
 .captions {
-  min-height: 130px;
-  margin-top: 18px;
-  padding: 20px;
+  margin-top: 10px;
+  padding: 14px 14px 12px;
   border: 1px solid #e3dbcd;
   border-radius: 18px;
   background: rgba(255, 253, 248, 0.8);
@@ -205,34 +204,80 @@ h1 {
   letter-spacing: 0.12em;
   font-weight: 800;
 }
+.caption-title > span {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.caption-title em {
+  color: #9b7951;
+  font-size: 8px;
+  font-style: normal;
+  letter-spacing: 0.04em;
+  text-transform: none;
+}
+.caption-title > div {
+  display: flex;
+  gap: 5px;
+}
 .caption-title button {
   border: 0;
   color: #50615a;
   background: transparent;
   cursor: pointer;
 }
+.caption-viewport {
+  height: clamp(340px, calc(100dvh - 355px), 640px);
+  margin-top: 10px;
+  padding: 4px 7px 18px 2px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scroll-behavior: smooth;
+  scrollbar-gutter: stable;
+}
 .caption-copy {
-  margin: 16px 0 0;
+  min-height: 100%;
+  margin: 0;
   font-family: Georgia, serif;
   font-size: 21px;
   line-height: 1.48;
 }
 .caption-final {
+  margin: 0 0 0.78em;
   color: #1f1c22;
 }
+.caption-word {
+  border-radius: 0.28em;
+  transition:
+    color 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+.caption-word.spoken {
+  color: #1f1c22;
+}
+.caption-word.current {
+  color: #172f29;
+  background: #f4c963;
+  box-shadow: 0 0 0 0.13em #f4c963;
+}
+.caption-word.future {
+  color: #aaa6ad;
+}
 .caption-live {
+  margin: 0;
   color: #9a969e;
+  font-style: italic;
 }
-.caption-final + .caption-live::before {
-  content: ' ';
-}
-.caption-live::after {
-  content: '  LIVE';
+.caption-live small {
+  display: block;
+  margin-bottom: 4px;
   font-family: ui-sans-serif, system-ui, sans-serif;
   font-size: 8px;
   font-weight: 800;
   letter-spacing: 0.1em;
-  vertical-align: 0.2em;
+  text-transform: uppercase;
+  font-style: normal;
   color: #aaa5ad;
 }
 .caption-placeholder {
@@ -243,7 +288,7 @@ h1 {
   font-size: 10px;
   line-height: 1.55;
   text-align: center;
-  margin: 16px 22px 0;
+  margin: 10px 22px 0;
 }
 .offline-card {
   margin: auto 0;
@@ -277,7 +322,7 @@ h1 {
 }
 footer {
   margin-top: auto;
-  padding-top: 24px;
+  padding-top: 12px;
   text-align: center;
   color: #9b9b94;
   font-size: 9px;
@@ -290,6 +335,33 @@ footer {
   }
   .language-picker button span {
     display: none;
+  }
+  .church-mark {
+    display: none;
+  }
+  header {
+    margin: 8px 0 10px;
+  }
+  header p {
+    font-size: 11px;
+  }
+  h1 {
+    font-size: 27px;
+  }
+  .delay {
+    font-size: 9px;
+  }
+  .wave {
+    display: none;
+  }
+  .player {
+    padding: 12px 14px 10px;
+  }
+  .listen {
+    min-width: 160px;
+  }
+  .caption-viewport {
+    height: clamp(360px, calc(100dvh - 310px), 660px);
   }
   .caption-copy {
     font-size: 19px;

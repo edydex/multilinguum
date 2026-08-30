@@ -175,8 +175,28 @@ export interface TranscriptSegment {
   sourceEndMs: number;
   emittedAt: string;
   firstDeltaAtUnixMs?: number;
+  /** Monotonic update number for provisional revisions of the same sequence. */
+  revision?: number;
+  /** Why this caption is provisional, or that finalized speech is queued. */
+  phase?: 'transcribing' | 'translating' | 'queued';
+  /** A source-audio pause detected immediately after this segment. */
+  sourcePauseAfterMs?: number | undefined;
+  /** Server-clock schedule for the audio listeners actually hear. */
+  playout?: CaptionPlayoutTiming;
   final: boolean;
   sequence: number;
+}
+
+export interface CaptionWordTiming {
+  text: string;
+  startOffsetMs: number;
+  endOffsetMs: number;
+}
+
+export interface CaptionPlayoutTiming {
+  startAtUnixMs: number;
+  endAtUnixMs: number;
+  words: CaptionWordTiming[];
 }
 
 export interface AudioTrackManifest {
@@ -235,6 +255,7 @@ export type ProcessorEvent =
 
 export interface PublicServiceState {
   active: boolean;
+  serverTimeUnixMs: number;
   sessionId?: string;
   churchName: string;
   startedAt?: string;

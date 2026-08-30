@@ -23,8 +23,10 @@ import { buildLatencyBreakdown, summarizeLatency } from './latency.js';
 import type { SermonContextStore } from './context-store.js';
 import type { VoiceProfileStore } from './voice-profile-store.js';
 import {
+  buildCaptionWordTimings,
   estimateSpeechDurationMs,
   prepareSpeechForContinuousPlayout,
+  preservedTrailingPauseMs,
   speechDurationMs,
 } from './speech-continuity.js';
 
@@ -51,6 +53,9 @@ interface RuntimeChannel {
   latencySamples: PipelineLatencySample[];
   audioChain: Promise<void>;
   pendingAudioEstimateMs: number;
+  lastFinalCaptionSequence: number;
+  lastProvisionalSequence: number;
+  lastProvisionalRevision: number;
 }
 
 export class SessionEngine {
@@ -150,6 +155,9 @@ export class SessionEngine {
         latencySamples: [],
         audioChain: Promise.resolve(),
         pendingAudioEstimateMs: 0,
+        lastFinalCaptionSequence: -1,
+        lastProvisionalSequence: -1,
+        lastProvisionalRevision: -1,
         health: {
           channelId: config.id,
           targetLanguage: config.targetLanguage,
@@ -259,6 +267,82 @@ export class SessionEngine {
       },
       undefined,
     );
+  }
+
+  async ingestProvisionalLiveTranscript(
+    source: TranscriptSegment,
+    onlyChannelIds: ReadonlySet<string>,
+  ): Promise<TranscriptSegment[]> {
+    const session = this.#requiredSession();
+    if (session.state !== 'live' || source.final) return [];
+    const normalized: TranscriptSegment = {
+      ...source,
+      sessionId: session.id,
+      channelId: `source-${session.sourceLanguage}`,
+      language: session.sourceLanguage,
+      final: false,
+    };
+    const results = await Promise.all(
+      [...this.#channels.values()]
+        .filter((runtime) => onlyChannelIds.has(runtime.config.id) && !runtime.config.muted)
+        .map(async (runtime) => {
+          const revision = normalized.revision ?? 0;
+          if (
+            normalized.sequence < runtime.lastFinalCaptionSequence ||
+            (normalized.sequence === runtime.lastFinalCaptionSequence &&
+              runtime.lastFinalCaptionSequence >= 0) ||
+            normalized.sequence < runtime.lastProvisionalSequence ||
+            (normalized.sequence === runtime.lastProvisionalSequence &&
+              revision <= runtime.lastProvisionalRevision)
+          ) {
+            return undefined;
+          }
+          let provisional: TranscriptSegment;
+          if (runtime.config.voiceMode === 'source') {
+            provisional = {
+              ...normalized,
+              channelId: runtime.config.id,
+              phase: 'transcribing',
+            };
+          } else {
+            const translated = await this.#translationProvider(runtime.config).translate(
+              normalized,
+              {
+                sourceLanguage: session.sourceLanguage,
+                targetLanguage: runtime.config.targetLanguage,
+                glossary: defaultGlossary[runtime.config.targetLanguage],
+                precedingText: runtime.precedingText,
+                sermonNotes: await this.#dependencies.context.retrieve(
+                  session.contextDocumentIds,
+                  normalized.text,
+                ),
+              },
+            );
+            provisional = {
+              ...translated,
+              sessionId: session.id,
+              channelId: runtime.config.id,
+              sequence: normalized.sequence,
+              revision,
+              phase: 'translating',
+              final: false,
+            };
+          }
+          if (normalized.sequence <= runtime.lastFinalCaptionSequence) return undefined;
+          if (
+            normalized.sequence < runtime.lastProvisionalSequence ||
+            (normalized.sequence === runtime.lastProvisionalSequence &&
+              revision <= runtime.lastProvisionalRevision)
+          ) {
+            return undefined;
+          }
+          runtime.lastProvisionalSequence = normalized.sequence;
+          runtime.lastProvisionalRevision = revision;
+          await this.#dependencies.relay.publishCaption(provisional);
+          return provisional;
+        }),
+    );
+    return results.filter((segment): segment is TranscriptSegment => Boolean(segment));
   }
 
   reportChannelFailure(channelId: string, error: Error, fallbackEngine?: string): void {
@@ -505,10 +589,16 @@ export class SessionEngine {
       }
 
       const finalCaption: TranscriptSegment = { ...translated, final: true };
+      runtime.lastFinalCaptionSequence = Math.max(
+        runtime.lastFinalCaptionSequence,
+        finalCaption.sequence,
+      );
       await this.#dependencies.archive.appendTranscript(finalCaption);
       const captionStartedAtUnixMs = Date.now();
       await this.#dependencies.relay.publishCaption(
-        runtime.effectiveVoiceMode === 'source' ? finalCaption : { ...finalCaption, final: false },
+        runtime.effectiveVoiceMode === 'source'
+          ? finalCaption
+          : { ...finalCaption, phase: 'translating', final: false },
       );
       captionPublish = {
         startedAtUnixMs: captionStartedAtUnixMs,
@@ -626,7 +716,7 @@ export class SessionEngine {
     }).then(
       (rendered) => ({
         ok: true as const,
-        rendered: prepareSpeechForContinuousPlayout(rendered),
+        rendered: prepareSpeechForContinuousPlayout(rendered, input.source.sourcePauseAfterMs),
         speechRender: {
           startedAtUnixMs: renderStartedAtUnixMs,
           completedAtUnixMs: Date.now(),
@@ -658,17 +748,29 @@ export class SessionEngine {
           input.runtime.config.id,
           result.rendered,
         );
-        await this.#dependencies.relay.publishCaption(input.translated);
         const audioStartedAtUnixMs = Date.now();
         const queuedBeforeMs = this.#dependencies.relay.audioBacklogMs(input.runtime.config.id);
+        const playoutStartAtUnixMs = audioStartedAtUnixMs + queuedBeforeMs;
+        const preservedPauseMs = preservedTrailingPauseMs(input.source.sourcePauseAfterMs);
+        const spokenDurationMs = Math.max(1, durationMs - preservedPauseMs);
+        const queuedCaption: TranscriptSegment = {
+          ...input.translated,
+          phase: 'queued',
+          playout: {
+            startAtUnixMs: playoutStartAtUnixMs,
+            endAtUnixMs: playoutStartAtUnixMs + durationMs,
+            words: buildCaptionWordTimings(input.translated.text, spokenDurationMs),
+          },
+        };
+        await this.#dependencies.relay.publishCaption(queuedCaption);
         await this.#dependencies.relay.publishAudio(input.runtime.config.id, result.rendered);
         audioPublish = {
           startedAtUnixMs: audioStartedAtUnixMs,
           completedAtUnixMs: Date.now(),
         };
         playout = {
-          startedAtUnixMs: audioStartedAtUnixMs + queuedBeforeMs,
-          completedAtUnixMs: audioStartedAtUnixMs + queuedBeforeMs + durationMs,
+          startedAtUnixMs: playoutStartAtUnixMs,
+          completedAtUnixMs: playoutStartAtUnixMs + durationMs,
         };
         input.runtime.pendingAudioEstimateMs = Math.max(
           0,

@@ -14,7 +14,7 @@ authorizer, confirmation date, permitted use, permitted language, reference lang
 and encrypted worker location. The raw sample is sent only to the processor and encrypted by the
 voice worker; it is never stored in the desktop renderer or repository.
 
-Expressive speech uses 0.98× as its calm default cadence. It does not compress each translated
+Expressive speech uses 0.96× as its calm default cadence. It does not compress each translated
 sentence to fit the source window. Gentle catch-up begins only when actual LiveKit playback plus
 in-flight rendering exceeds 20 seconds: 1.03×, then 1.07× above 30 seconds, with a hard 1.12×
 ceiling. The operator's Queue metric is this real playback estimate.

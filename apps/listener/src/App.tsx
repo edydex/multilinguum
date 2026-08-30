@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { RemoteAudioTrack, Room } from 'livekit-client';
 import type {
   Language,
@@ -6,6 +6,7 @@ import type {
   PublicServiceState,
   TranscriptSegment,
 } from '@multilinguum/protocol';
+import { captionWordState, mergeCaption, type CaptionTimeline } from './caption-timeline';
 
 const names: Record<Language, string> = {
   en: 'English',
@@ -22,47 +23,61 @@ interface TokenResponse {
   expiresInSeconds: number;
 }
 
-interface CaptionPair {
-  final?: TranscriptSegment;
-  live?: TranscriptSegment;
-}
-
-function mergeCaption(current: CaptionPair | undefined, segment: TranscriptSegment): CaptionPair {
-  const existing = current ?? {};
-  if (!segment.final) {
-    if ((existing.final?.sequence ?? -1) > segment.sequence) return existing;
-    if ((existing.live?.sequence ?? -1) > segment.sequence) return existing;
-    return { ...existing, live: segment };
-  }
-  if ((existing.final?.sequence ?? -1) > segment.sequence) return existing;
-  return {
-    final: segment,
-    ...(existing.live && existing.live.sequence > segment.sequence ? { live: existing.live } : {}),
-  };
+function CaptionWords({ segment, now }: { segment: TranscriptSegment; now: number }) {
+  const playout = segment.playout;
+  if (!playout?.words.length) return <>{segment.text}</>;
+  return (
+    <>
+      {playout.words.map((word, index) => {
+        const start = playout.startAtUnixMs + word.startOffsetMs;
+        const end = playout.startAtUnixMs + word.endOffsetMs;
+        const state = captionWordState(start, end, now);
+        return (
+          <span
+            key={`${segment.sequence}-${index}`}
+            className={`caption-word ${state}`}
+            aria-current={state === 'current' ? 'true' : undefined}
+          >
+            {word.text}
+            {index < playout.words.length - 1 ? ' ' : ''}
+          </span>
+        );
+      })}
+    </>
+  );
 }
 
 export function App() {
   const [service, setService] = useState<PublicServiceState>({
     active: false,
+    serverTimeUnixMs: Date.now(),
     churchName: 'Word of Truth',
     languages: [],
   });
   const [language, setLanguage] = useState<Language>();
-  const [captions, setCaptions] = useState<Record<string, CaptionPair>>({});
+  const [captions, setCaptions] = useState<Record<string, CaptionTimeline>>({});
   const [connected, setConnected] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [captionsVisible, setCaptionsVisible] = useState(true);
   const [volume, setVolume] = useState(1);
+  const [followingLive, setFollowingLive] = useState(true);
+  const [clockOffsetMs, setClockOffsetMs] = useState(0);
+  const [captionClock, setCaptionClock] = useState(Date.now());
   const [error, setError] = useState<string>();
   const roomRef = useRef<Room | undefined>(undefined);
   const audioRef = useRef<HTMLAudioElement | undefined>(undefined);
   const tracksRef = useRef(new Map<Language, RemoteAudioTrack>());
+  const captionViewportRef = useRef<HTMLDivElement | null>(null);
+  const followingLiveRef = useRef(true);
 
   useEffect(() => {
     const load = async () => {
       try {
+        const requestedAt = Date.now();
         const response = await fetch(new URL('/api/public/service', apiBase));
         const next = (await response.json()) as PublicServiceState;
+        const receivedAt = Date.now();
+        setClockOffsetMs(next.serverTimeUnixMs - (requestedAt + receivedAt) / 2);
         setService(next);
         setLanguage(
           (current) => current ?? next.languages.find((item) => item.available)?.language,
@@ -88,6 +103,7 @@ export function App() {
           ProcessorEvent | { type: 'public-state'; state: PublicServiceState };
         if (event.type === 'public-state') {
           setService(event.state);
+          setClockOffsetMs(event.state.serverTimeUnixMs - Date.now());
         } else if (event.type === 'session') {
           void load();
         } else if (event.type === 'transcript') {
@@ -111,6 +127,14 @@ export function App() {
       socket?.close();
     };
   }, []);
+
+  useEffect(() => {
+    if (!service.active || !captionsVisible) return;
+    const update = () => setCaptionClock(Date.now() + clockOffsetMs);
+    update();
+    const timer = window.setInterval(update, 80);
+    return () => window.clearInterval(timer);
+  }, [captionsVisible, clockOffsetMs, service.active]);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -196,6 +220,38 @@ export function App() {
 
   const selectedChannel = service.languages.find((item) => item.language === language);
   const caption = language ? captions[language] : undefined;
+  const captionRevision = `${caption?.final.length ?? 0}:${caption?.live?.sequence ?? -1}:${caption?.live?.revision ?? -1}:${caption?.live?.text.length ?? 0}`;
+
+  useLayoutEffect(() => {
+    const viewport = captionViewportRef.current;
+    if (!viewport || !followingLiveRef.current) return;
+    viewport.scrollTop = viewport.scrollHeight;
+  }, [captionRevision, captionsVisible, language]);
+
+  useEffect(() => {
+    followingLiveRef.current = true;
+    setFollowingLive(true);
+    window.requestAnimationFrame(() => {
+      const viewport = captionViewportRef.current;
+      if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    });
+  }, [language]);
+
+  const updateCaptionFollow = () => {
+    const viewport = captionViewportRef.current;
+    if (!viewport) return;
+    const atBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight <= 36;
+    followingLiveRef.current = atBottom;
+    setFollowingLive(atBottom);
+  };
+
+  const jumpToLive = () => {
+    const viewport = captionViewportRef.current;
+    if (!viewport) return;
+    followingLiveRef.current = true;
+    setFollowingLive(true);
+    viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' });
+  };
   const status = useMemo(() => {
     if (!service.active) return 'Service offline';
     if (!connected) return 'Ready to connect';
@@ -266,25 +322,47 @@ export function App() {
 
           <section className={`captions ${captionsVisible ? '' : 'hidden'}`}>
             <div className="caption-title">
-              <span>LIVE CAPTIONS</span>
-              <button onClick={() => setCaptionsVisible((visible) => !visible)}>
-                {captionsVisible ? 'Hide' : 'Show'}
-              </button>
+              <span>
+                LIVE CAPTIONS
+                {!followingLive && <em>Browsing earlier text</em>}
+              </span>
+              <div>
+                {!followingLive && <button onClick={jumpToLive}>Jump to live</button>}
+                <button onClick={() => setCaptionsVisible((visible) => !visible)}>
+                  {captionsVisible ? 'Hide' : 'Show'}
+                </button>
+              </div>
             </div>
             {captionsVisible && (
-              <p className="caption-copy">
-                {caption?.final ? (
-                  <span className="caption-final">{caption.final.text}</span>
-                ) : !caption?.live ? (
-                  <span className="caption-placeholder">
-                    Captions will appear when the speaker begins.
-                  </span>
-                ) : null}
-                {caption?.live &&
-                  (!caption.final || caption.live.sequence > caption.final.sequence) && (
-                    <span className="caption-live">{caption.live.text}</span>
-                  )}
-              </p>
+              <div
+                className="caption-viewport"
+                ref={captionViewportRef}
+                onScroll={updateCaptionFollow}
+              >
+                <div className="caption-copy" aria-live="polite">
+                  {caption?.final.map((segment) => (
+                    <p className="caption-final" key={`${segment.sessionId}-${segment.sequence}`}>
+                      <CaptionWords segment={segment} now={captionClock} />
+                    </p>
+                  ))}
+                  {!caption?.final.length && !caption?.live ? (
+                    <span className="caption-placeholder">
+                      Captions will appear when the speaker begins.
+                    </span>
+                  ) : null}
+                  {caption?.live &&
+                    (caption.final.at(-1)?.sequence ?? -1) < caption.live.sequence && (
+                      <p className="caption-live" key={`live-${caption.live.sequence}`}>
+                        <small>
+                          {caption.live.phase === 'transcribing'
+                            ? 'Live transcription'
+                            : 'Live translation'}
+                        </small>
+                        {caption.live.text}
+                      </p>
+                    )}
+                </div>
+              </div>
             )}
           </section>
 

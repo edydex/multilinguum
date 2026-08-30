@@ -30,7 +30,11 @@ interface CascadeBuffer {
   timing: Parameters<SessionEngine['ingestLiveTranscript']>[1];
 }
 
-const expressiveMaximumWindowMs = 8_000;
+const expressiveMaximumWindowMs = 7_000;
+const provisionalTranslationIntervalMs = 300;
+const sourcePauseCommitMs = 360;
+const minimumSpeechWindowMs = 1_200;
+const speechRmsThreshold = 190;
 
 function lastSentenceBoundary(text: string): number {
   const pattern = /[.!?…]["'»”)]*(?=\s|$)/gu;
@@ -62,10 +66,17 @@ export class RealtimeCapturePipeline {
   #latestCapturedAtUnixMs = 0;
   #cascadeBuffer: CascadeBuffer | undefined;
   #cascadeSequence = 0;
+  #cascadeProvisionalRevision = 0;
   #inputChain = Promise.resolve();
   #sourceTranscriptChain = Promise.resolve();
   #cascadeTranscriptChain = Promise.resolve();
+  #provisionalTranscriptChain = Promise.resolve();
   #translatedTranscriptChain = Promise.resolve();
+  #pendingProvisionalCascade: TranscriptSegment | undefined;
+  #provisionalTimer: ReturnType<typeof setTimeout> | undefined;
+  #speechWindowActive = false;
+  #silenceDurationMs = 0;
+  #lastPauseCommitMs = 0;
   #started = false;
 
   constructor(
@@ -148,6 +159,7 @@ export class RealtimeCapturePipeline {
             .filter(([channelId]) => this.#activeDirectChannelIds.has(channelId))
             .map(([, channel]) => channel.pushAudio(chunk)),
         ]);
+        this.#observeSourcePause(chunk);
         await this.#flushCompleteSourceChunks(capturedAtUnixMs);
       })
       .catch((error) => {
@@ -165,11 +177,15 @@ export class RealtimeCapturePipeline {
     await this.#flushPendingSource();
     await Promise.allSettled([...this.#channels.values()].map((channel) => channel.stop()));
     await this.#transcriber.stop();
+    if (this.#provisionalTimer) clearTimeout(this.#provisionalTimer);
+    this.#provisionalTimer = undefined;
+    this.#pendingProvisionalCascade = undefined;
     for (const channelId of this.#transcriptBuffers.keys()) this.#flushTranscript(channelId);
     this.#flushCompletedCascadeAtStop();
     await Promise.all([
       this.#sourceTranscriptChain,
       this.#cascadeTranscriptChain,
+      this.#provisionalTranscriptChain,
       this.#translatedTranscriptChain,
       ...this.#audioChains.values(),
     ]);
@@ -218,6 +234,10 @@ export class RealtimeCapturePipeline {
   }
 
   #receiveSourceTranscript(segment: TranscriptSegment): void {
+    if (!segment.final) {
+      this.#receiveProvisionalSourceTranscript(segment);
+      return;
+    }
     const completedAtUnixMs = Date.parse(segment.emittedAt);
     const captureCompletedAtUnixMs = this.#captureTimestamp(segment.sourceEndMs);
     const timing = {
@@ -254,7 +274,61 @@ export class RealtimeCapturePipeline {
           error instanceof Error ? error : new Error(String(error)),
         );
       });
+    this.#queueProvisionalCascade({
+      ...segment,
+      phase: 'transcribing',
+      final: false,
+    });
     this.#bufferCascadeTranscript(segment, timing);
+  }
+
+  #receiveProvisionalSourceTranscript(segment: TranscriptSegment): void {
+    const sourceChannelIds = new Set([this.#sourceChannelId()]);
+    this.#sourceTranscriptChain = this.#sourceTranscriptChain
+      .then(() => this.#engine.ingestProvisionalLiveTranscript(segment, sourceChannelIds))
+      .then(() => undefined)
+      .catch((error) => {
+        this.#engine.reportChannelFailure(
+          this.#sourceChannelId(),
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      });
+
+    this.#queueProvisionalCascade(segment);
+  }
+
+  #queueProvisionalCascade(segment: TranscriptSegment): void {
+    const cascadeChannelIds = this.#cascadeChannelIds();
+    if (cascadeChannelIds.size === 0) return;
+    const finalizedPrefix = this.#cascadeBuffer?.segment;
+    const text = [finalizedPrefix?.text.trim(), segment.text.trim()].filter(Boolean).join(' ');
+    if (!text) return;
+    this.#pendingProvisionalCascade = {
+      ...segment,
+      id: `cascade-preview-${this.#cascadeSequence}`,
+      text,
+      sourceStartMs: finalizedPrefix?.sourceStartMs ?? segment.sourceStartMs,
+      sourceEndMs: Math.max(finalizedPrefix?.sourceEndMs ?? 0, segment.sourceEndMs),
+      sequence: this.#cascadeSequence,
+      revision: ++this.#cascadeProvisionalRevision,
+      phase: 'transcribing',
+      final: false,
+    };
+    this.#scheduleProvisionalTranslation(cascadeChannelIds);
+  }
+
+  #scheduleProvisionalTranslation(channelIds: ReadonlySet<string>): void {
+    if (this.#provisionalTimer) return;
+    this.#provisionalTimer = setTimeout(() => {
+      this.#provisionalTimer = undefined;
+      this.#provisionalTranscriptChain = this.#provisionalTranscriptChain
+        .then(async () => {
+          const latest = this.#pendingProvisionalCascade;
+          this.#pendingProvisionalCascade = undefined;
+          if (latest) await this.#engine.ingestProvisionalLiveTranscript(latest, channelIds);
+        })
+        .catch(() => undefined);
+    }, provisionalTranslationIntervalMs);
   }
 
   #bufferCascadeTranscript(
@@ -273,6 +347,7 @@ export class RealtimeCapturePipeline {
             text: `${existing.text.trim()} ${segment.text.trim()}`,
             sourceEndMs: Math.max(existing.sourceEndMs, segment.sourceEndMs),
             emittedAt: segment.emittedAt,
+            sourcePauseAfterMs: segment.sourcePauseAfterMs,
             final: true,
           }
         : {
@@ -281,10 +356,16 @@ export class RealtimeCapturePipeline {
           },
       timing,
     };
-    const buffered = this.#cascadeBuffer.segment;
+    const buffered = this.#cascadeBuffer?.segment;
+    if (!buffered) return;
     const boundary = lastSentenceBoundary(buffered.text);
     if (boundary > 0) {
       this.#flushCascadeSentence(boundary);
+    } else if (
+      (segment.sourcePauseAfterMs ?? 0) >= sourcePauseCommitMs &&
+      buffered.sourceEndMs - buffered.sourceStartMs >= minimumSpeechWindowMs
+    ) {
+      this.#flushCascadeTranscript();
     } else if (buffered.sourceEndMs - buffered.sourceStartMs >= expressiveMaximumWindowMs) {
       this.#flushCascadeTranscript();
     }
@@ -317,6 +398,7 @@ export class RealtimeCapturePipeline {
         ...buffered.segment,
         text: completeText,
         sourceEndMs: completeEndMs,
+        ...(remainingText ? { sourcePauseAfterMs: undefined } : {}),
       },
       timing: completeTiming,
     };
@@ -340,14 +422,7 @@ export class RealtimeCapturePipeline {
     if (!buffered) return;
     this.#cascadeBuffer = undefined;
     this.#cascadeSequence += 1;
-    const cascadeChannelIds = new Set(
-      this.#session.targets
-        .filter(
-          (channel) =>
-            channel.voiceMode !== 'source' && !this.#activeDirectChannelIds.has(channel.id),
-        )
-        .map((channel) => channel.id),
-    );
+    const cascadeChannelIds = this.#cascadeChannelIds();
     if (cascadeChannelIds.size === 0) return;
     this.#cascadeTranscriptChain = this.#cascadeTranscriptChain
       .then(async () => {
@@ -366,6 +441,45 @@ export class RealtimeCapturePipeline {
           );
         }
       });
+  }
+
+  #cascadeChannelIds(): Set<string> {
+    return new Set(
+      this.#session.targets
+        .filter(
+          (channel) =>
+            channel.voiceMode !== 'source' && !this.#activeDirectChannelIds.has(channel.id),
+        )
+        .map((channel) => channel.id),
+    );
+  }
+
+  #observeSourcePause(chunk: AudioChunk): void {
+    if (chunk.encoding !== 'pcm_s16le' || chunk.data.byteLength < 2) return;
+    const aligned = new Uint8Array(chunk.data.byteLength);
+    aligned.set(chunk.data);
+    const samples = new Int16Array(aligned.buffer);
+    let energy = 0;
+    for (const sample of samples) energy += sample * sample;
+    const rms = Math.sqrt(energy / samples.length);
+    const durationMs = Math.max(0, chunk.endMs - chunk.startMs);
+    if (rms >= speechRmsThreshold) {
+      this.#speechWindowActive = true;
+      this.#silenceDurationMs = 0;
+      return;
+    }
+    if (!this.#speechWindowActive) return;
+    this.#silenceDurationMs += durationMs;
+    if (
+      this.#silenceDurationMs < sourcePauseCommitMs ||
+      chunk.endMs - this.#lastPauseCommitMs < minimumSpeechWindowMs
+    ) {
+      return;
+    }
+    this.#transcriber.flushAudio(this.#silenceDurationMs);
+    this.#lastPauseCommitMs = chunk.endMs;
+    this.#speechWindowActive = false;
+    this.#silenceDurationMs = 0;
   }
 
   #flushCompletedCascadeAtStop(): void {

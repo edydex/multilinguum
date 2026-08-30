@@ -18,11 +18,16 @@ interface ItemTiming {
   startMs?: number;
   endMs?: number;
   firstDeltaAtUnixMs?: number;
+  sourcePauseAfterMs?: number;
+  text?: string;
+  sequence?: number;
+  revision?: number;
 }
 
 interface CommittedWindow {
   startMs: number;
   endMs: number;
+  sourcePauseAfterMs?: number;
 }
 
 export interface TranscriptionSecretProvider {
@@ -102,7 +107,7 @@ export class OpenAILiveTranscriber implements Transcriber {
     this.#secretProvider = options.secretProvider ?? new OpenAITranscriptionSecretProvider(apiKey);
     this.#connectionFactory = options.connectionFactory ?? createWebSocketRealtimeConnection;
     this.#stopDrainMs = options.stopDrainMs ?? 15_000;
-    this.#commitIntervalMs = options.commitIntervalMs ?? 8_000;
+    this.#commitIntervalMs = options.commitIntervalMs ?? 3_500;
   }
 
   async start(session: ServiceSession): Promise<void> {
@@ -151,6 +156,11 @@ export class OpenAILiveTranscriber implements Transcriber {
     }
   }
 
+  flushAudio(sourcePauseAfterMs?: number): void {
+    if (!this.#connection || this.#lastAudioEndMs <= this.#commitWindowStartMs) return;
+    this.#commit(this.#lastAudioEndMs, this.#connection, sourcePauseAfterMs);
+  }
+
   async stop(): Promise<void> {
     const connection = this.#connection;
     this.#connection = undefined;
@@ -189,7 +199,37 @@ export class OpenAILiveTranscriber implements Transcriber {
     if (event.type === 'conversation.item.input_audio_transcription.delta' && itemId) {
       const timing = this.#timingForItem(itemId);
       timing.firstDeltaAtUnixMs ??= Date.now();
+      timing.sequence ??= this.#sequence++;
+      timing.revision = (timing.revision ?? 0) + 1;
+      if (typeof event.delta === 'string') timing.text = `${timing.text ?? ''}${event.delta}`;
       this.#itemTiming.set(itemId, timing);
+      const text = timing.text?.trim();
+      if (text && this.#session) {
+        const sourceStartMs = Math.max(0, Math.round(timing.startMs ?? this.#lastAudioEndMs));
+        const sourceEndMs = Math.max(
+          sourceStartMs + 1,
+          Math.round(timing.endMs ?? this.#lastAudioEndMs),
+        );
+        const segment: TranscriptSegment = {
+          id: itemId,
+          sessionId: this.#session.id,
+          channelId: `source-${this.#session.sourceLanguage}`,
+          language: this.#session.sourceLanguage,
+          text,
+          sourceStartMs,
+          sourceEndMs,
+          emittedAt: new Date().toISOString(),
+          firstDeltaAtUnixMs: timing.firstDeltaAtUnixMs,
+          revision: timing.revision,
+          phase: 'transcribing',
+          ...(timing.sourcePauseAfterMs !== undefined
+            ? { sourcePauseAfterMs: timing.sourcePauseAfterMs }
+            : {}),
+          final: false,
+          sequence: timing.sequence,
+        };
+        for (const listener of this.#segmentListeners) listener(segment);
+      }
       return;
     }
     if (
@@ -208,6 +248,7 @@ export class OpenAILiveTranscriber implements Transcriber {
     }
     if (!text) return;
     const timing = this.#timingForItem(itemId);
+    timing.sequence ??= this.#sequence++;
     const sourceStartMs = Math.max(0, Math.round(timing.startMs ?? this.#lastAudioEndMs));
     const sourceEndMs = Math.max(
       sourceStartMs + 1,
@@ -225,16 +266,23 @@ export class OpenAILiveTranscriber implements Transcriber {
       ...(timing.firstDeltaAtUnixMs !== undefined
         ? { firstDeltaAtUnixMs: timing.firstDeltaAtUnixMs }
         : {}),
+      ...(timing.sourcePauseAfterMs !== undefined
+        ? { sourcePauseAfterMs: timing.sourcePauseAfterMs }
+        : {}),
       final: true,
-      sequence: this.#sequence++,
+      sequence: timing.sequence,
     };
     for (const listener of this.#segmentListeners) listener(segment);
     this.#itemTiming.delete(itemId);
   }
 
-  #commit(endMs: number, connection = this.#connection): void {
+  #commit(endMs: number, connection = this.#connection, sourcePauseAfterMs?: number): void {
     if (!connection || endMs <= this.#commitWindowStartMs) return;
-    const window = { startMs: this.#commitWindowStartMs, endMs };
+    const window: CommittedWindow = {
+      startMs: this.#commitWindowStartMs,
+      endMs,
+      ...(sourcePauseAfterMs !== undefined ? { sourcePauseAfterMs } : {}),
+    };
     const itemId = this.#unassignedItemIds.shift();
     if (itemId) {
       this.#itemTiming.set(itemId, { ...this.#itemTiming.get(itemId), ...window });

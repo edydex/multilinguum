@@ -39,6 +39,8 @@ export interface Transcriber {
   readonly name: string;
   start(session: ServiceSession): Promise<void>;
   pushAudio(chunk: AudioChunk): Promise<void>;
+  /** Commit the current recognition window at a detected natural pause. */
+  flushAudio(sourcePauseAfterMs?: number): void;
   stop(): Promise<void>;
   onSegment(listener: (segment: TranscriptSegment) => void): () => void;
   onError(listener: (error: Error) => void): () => void;

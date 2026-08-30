@@ -27,7 +27,7 @@ The Tauri shell is a private controller. The Web Audio capture path requests a m
 
 ### Processor
 
-The processor owns every provider credential and the authoritative session state. It validates all operator input with Zod, limits the system to one church service, sequences each target independently, measures actual relay backlog, and automatically moves cloned output to the natural renderer after ten seconds. Expressive channels translate in source order while rendering upcoming clauses concurrently; a separate ordered playout chain trims only synthetic edge silence and feeds a larger LiveKit queue continuously.
+The processor owns every provider credential and the authoritative session state. It validates all operator input with Zod, limits the system to one church service, sequences each target independently, measures actual relay backlog, and automatically moves cloned output to the natural renderer after ten seconds. Expressive channels translate in source order while rendering upcoming clauses concurrently; a separate ordered playout chain trims only synthetic edge silence, retains bounded source-pause cadence, feeds a larger LiveKit queue continuously, and publishes the scheduled playout span used by listener karaoke captions.
 
 Provider-specific events do not enter UI state. The shared boundaries are:
 
@@ -72,4 +72,4 @@ Production mounts must be root-owned storage on an encrypted Linux volume. The c
 
 ## Latency budget
 
-The acceptance target is p95 capture-to-listener audio at or below ten seconds. The accuracy-first fallback may use up to eight seconds of source context while waiting for a complete thought. It does not routinely rush speech to hide that delay: normal cadence is 0.98× and gentle catch-up starts only after the real playback queue exceeds 20 seconds. If queue depth cannot remain bounded for two hours, the channel is not service-ready.
+The acceptance target is p95 capture-to-listener audio at or below ten seconds. The accuracy-first fallback normally publishes recognition revisions every 3.5 seconds while allowing up to seven seconds of accumulated source context for a complete thought. A source pause can close the window earlier. It does not routinely rush speech to hide that delay: normal cadence is 0.96× and gentle catch-up starts only after the real playback queue exceeds 20 seconds. If queue depth cannot remain bounded for two hours, the channel is not service-ready.

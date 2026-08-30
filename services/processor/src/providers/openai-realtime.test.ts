@@ -146,8 +146,15 @@ describe('OpenAI Realtime provider adapters', () => {
       transcript: 'Благодать вам и мир.',
     });
 
-    expect(segments).toHaveLength(1);
+    expect(segments).toHaveLength(2);
     expect(segments[0]).toMatchObject({
+      text: 'Благодать',
+      revision: 1,
+      phase: 'transcribing',
+      final: false,
+      sequence: 0,
+    });
+    expect(segments[1]).toMatchObject({
       sessionId: 'session-test',
       channelId: 'source-ru',
       language: 'ru',
@@ -165,6 +172,36 @@ describe('OpenAI Realtime provider adapters', () => {
     expect(connection.sent[1]).toEqual({ type: 'input_audio_buffer.commit' });
     await transcriber.stop();
     expect(connection.closed).toBe(true);
+  });
+
+  it('carries a detected source pause into provisional and finalized segments', async () => {
+    const connection = new FakeRealtimeConnection();
+    const transcriber = new OpenAILiveTranscriber('not-used-in-test', 'gpt-live-transcribe', {
+      connectionFactory: () => connection,
+      secretProvider: { create: async () => 'short-lived-test-secret' },
+      stopDrainMs: 0,
+      commitIntervalMs: 8_000,
+    });
+    const segments: TranscriptSegment[] = [];
+    transcriber.onSegment((segment) => segments.push(segment));
+
+    await transcriber.start(session());
+    await transcriber.pushAudio(captureChunk(2_000));
+    transcriber.flushAudio(420);
+    connection.emit({
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'pause-item',
+      delta: 'Поэтому мы помним,',
+    });
+    connection.emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'pause-item',
+      transcript: 'Поэтому мы помним,',
+    });
+
+    expect(connection.sent[1]).toEqual({ type: 'input_audio_buffer.commit' });
+    expect(segments.map((segment) => segment.sourcePauseAfterMs)).toEqual([420, 420]);
+    await transcriber.stop();
   });
 
   it('uses longer supported commit windows for sentence-aware downstream buffering', async () => {

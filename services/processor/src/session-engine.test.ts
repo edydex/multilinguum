@@ -160,6 +160,24 @@ describe('SessionEngine look-ahead speech queue', () => {
     });
     await engine.start();
 
+    await engine.ingestProvisionalLiveTranscript(
+      {
+        id: 'preview-0',
+        sessionId: 'session-preview',
+        channelId: 'source-ru',
+        language: 'ru',
+        text: 'Первое',
+        sourceStartMs: 0,
+        sourceEndMs: 900,
+        emittedAt: new Date().toISOString(),
+        revision: 1,
+        phase: 'transcribing',
+        final: false,
+        sequence: 0,
+      },
+      new Set(['channel-en']),
+    );
+
     await engine.ingestTranscript({
       text: 'Первое предложение.',
       sourceStartMs: 0,
@@ -180,7 +198,7 @@ describe('SessionEngine look-ahead speech queue', () => {
       captions
         .filter((segment) => segment.channelId === 'channel-en' && !segment.final)
         .map((segment) => segment.sequence),
-    ).toEqual([0, 1]);
+    ).toEqual([0, 0, 1]);
 
     renderer.resolve(1);
     renderer.resolve(0);
@@ -192,6 +210,11 @@ describe('SessionEngine look-ahead speech queue', () => {
         .filter((segment) => segment.channelId === 'channel-en' && segment.final)
         .map((segment) => segment.sequence),
     ).toEqual([0, 1]);
+    expect(
+      captions
+        .filter((segment) => segment.channelId === 'channel-en' && segment.final)
+        .every((segment) => segment.playout?.words.length),
+    ).toBe(true);
     expect(
       transcripts
         .filter((segment) => segment.channelId === 'channel-en')
