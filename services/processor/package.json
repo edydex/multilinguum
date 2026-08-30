@@ -9,6 +9,7 @@
     "benchmark:complimentary": "node dist/complimentary-benchmark.js",
     "rehearse:authorized-sermon": "node dist/authorized-sermon-rehearsal.js",
     "reference:authorized-sermon": "node dist/authorized-sermon-quality-reference.js",
+    "rerender:review": "node dist/review-rerender.js",
     "dev": "tsx watch src/main.ts",
     "start": "node dist/main.js",
     "test": "vitest run",
