@@ -183,6 +183,8 @@ export interface TranscriptSegment {
   sourcePauseAfterMs?: number | undefined;
   /** Coarse source delivery cues used to steer generic speech without copying a voice. */
   sourceDelivery?: SourceDelivery | undefined;
+  /** Semantic delivery decisions produced with the translation for narrator phrasing. */
+  narrationPlan?: NarrationPlan | undefined;
   /** Server-clock schedule for the audio listeners actually hear. */
   playout?: CaptionPlayoutTiming;
   final: boolean;
@@ -193,6 +195,13 @@ export interface SourceDelivery {
   pace: 'measured' | 'steady' | 'animated';
   energy: 'soft' | 'balanced' | 'emphatic';
   contour: 'statement' | 'question' | 'continuation' | 'exclamation';
+}
+
+export interface NarrationPlan {
+  role: 'neutral' | 'question' | 'enumeration' | 'contrast' | 'appeal' | 'quotation' | 'transition';
+  cadence: 'flowing' | 'measured' | 'separated' | 'urgent';
+  /** Exact substrings in translated text that carry the thought's primary stress. */
+  emphasis: string[];
 }
 
 export interface CaptionWordTiming {

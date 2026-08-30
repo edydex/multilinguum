@@ -458,4 +458,54 @@ describe('RealtimeCapturePipeline', () => {
       }),
     );
   });
+
+  it('keeps a short rhetorical question list in one narrator unit', async () => {
+    const calls: unknown[][] = [];
+    const engine = {
+      ingestSourceAudio: async () => undefined,
+      ingestLiveTranscript: async (...input: unknown[]) => {
+        calls.push(input);
+        return [];
+      },
+      reportChannelFailure: () => undefined,
+    } as unknown as SessionEngine;
+    const transcriber = new FakeTranscriber();
+    const pipeline = new RealtimeCapturePipeline(
+      engine,
+      cascadeSession(),
+      transcriber,
+      () => new FakeTranslationChannel(),
+    );
+    await pipeline.start();
+    const base = {
+      sessionId: 'session-live-test',
+      channelId: 'source-ru',
+      language: 'ru' as const,
+      emittedAt: new Date().toISOString(),
+      final: true,
+      sourcePauseAfterMs: 360,
+    };
+    transcriber.emit({
+      ...base,
+      id: 'list-intro',
+      text: 'Мы должны это делать. Что?',
+      sourceStartMs: 0,
+      sourceEndMs: 2_900,
+      sequence: 0,
+    });
+    transcriber.emit({
+      ...base,
+      id: 'list-rest',
+      text: 'Как и почему?',
+      sourceStartMs: 2_900,
+      sourceEndMs: 4_800,
+      sequence: 1,
+    });
+    await pipeline.close();
+
+    const cascadeTexts = calls
+      .filter((call) => (call[3] as Set<string>).has('channel-en'))
+      .map((call) => (call[0] as TranscriptSegment).text);
+    expect(cascadeTexts).toEqual(['Мы должны это делать. Что? Как и почему?']);
+  });
 });

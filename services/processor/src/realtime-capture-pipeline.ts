@@ -59,6 +59,19 @@ function isNarrationReady(text: string, durationMs: number): boolean {
   return words >= 3 && durationMs >= 2_800;
 }
 
+function shouldHoldForRhetoricalList(text: string): boolean {
+  const clauses = text.match(/[^.!?…]+[.!?…]+|[^.!?…]+$/gu)?.map((clause) => clause.trim()) ?? [];
+  const shortQuestions = clauses.filter(
+    (clause) => /\?+["'»”)]*$/u.test(clause) && wordCount(clause) <= 3,
+  );
+  const last = clauses.at(-1);
+  return (
+    clauses.length > 1 &&
+    shortQuestions.length === 1 &&
+    Boolean(last && /\?+["'»”)]*$/u.test(last) && wordCount(last) <= 3)
+  );
+}
+
 function pcmRms(data: Uint8Array): number {
   if (data.byteLength < 2) return 0;
   const aligned = new Uint8Array(data.byteLength);
@@ -348,9 +361,15 @@ export class RealtimeCapturePipeline {
     const boundaryDurationMs = Math.round(
       durationMs * Math.min(1, boundary / Math.max(1, buffered.text.length)),
     );
-    if (boundary > 0 && isNarrationReady(buffered.text.slice(0, boundary), boundaryDurationMs)) {
+    const holdForRhetoricalList = shouldHoldForRhetoricalList(buffered.text.slice(0, boundary));
+    if (
+      boundary > 0 &&
+      isNarrationReady(buffered.text.slice(0, boundary), boundaryDurationMs) &&
+      !holdForRhetoricalList
+    ) {
       this.#flushCascadeSentence(boundary);
     } else if (
+      !holdForRhetoricalList &&
       (segment.sourcePauseAfterMs ?? 0) >= sourcePauseCommitMs &&
       isNarrationReady(buffered.text, durationMs)
     ) {
