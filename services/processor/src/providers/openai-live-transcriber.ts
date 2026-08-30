@@ -107,7 +107,9 @@ export class OpenAILiveTranscriber implements Transcriber {
     this.#secretProvider = options.secretProvider ?? new OpenAITranscriptionSecretProvider(apiKey);
     this.#connectionFactory = options.connectionFactory ?? createWebSocketRealtimeConnection;
     this.#stopDrainMs = options.stopDrainMs ?? 15_000;
-    this.#commitIntervalMs = options.commitIntervalMs ?? 3_500;
+    // Keep a long safety window so a word is not cut simply to make captions
+    // look busy. The capture pipeline commits much earlier at a real pause.
+    this.#commitIntervalMs = options.commitIntervalMs ?? 8_000;
   }
 
   async start(session: ServiceSession): Promise<void> {

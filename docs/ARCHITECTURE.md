@@ -72,4 +72,4 @@ Production mounts must be root-owned storage on an encrypted Linux volume. The c
 
 ## Latency budget
 
-The acceptance target is p95 capture-to-listener audio at or below ten seconds. The accuracy-first fallback normally publishes recognition revisions every 3.5 seconds while allowing up to seven seconds of accumulated source context for a complete thought. A source pause can close the window earlier. It does not routinely rush speech to hide that delay: normal cadence is 0.96× and gentle catch-up starts only after the real playback queue exceeds 20 seconds. If queue depth cannot remain bounded for two hours, the channel is not service-ready.
+The acceptance target is p95 capture-to-listener audio at or below ten seconds. The accuracy-first fallback publishes recognition revisions at detected source pauses, with an eight-second safety maximum for uninterrupted speech. It does not routinely rush speech to hide that delay: normal cadence is 0.96× and gentle catch-up starts only after the real playback queue exceeds 20 seconds. If queue depth cannot remain bounded for two hours, the channel is not service-ready.
