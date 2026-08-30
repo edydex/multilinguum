@@ -13,19 +13,6 @@ export interface ReviewTrack {
   durationMs: number;
 }
 
-export interface ReviewThoughtAnchor {
-  id: string;
-  label: string;
-  sourceStartMs: number;
-  sourceEndMs: number;
-}
-
-export interface ThoughtAlignedPosition {
-  audioMs: number;
-  sourceMs: number;
-  anchor: ReviewThoughtAnchor | undefined;
-}
-
 export function parseJsonLines<T>(contents: string): T[] {
   return contents
     .split(/\r?\n/)
@@ -108,57 +95,6 @@ function progress(value: number, start: number, end: number): number {
   return Math.max(0, Math.min(1, (value - start) / (end - start)));
 }
 
-function closesThought(text: string): boolean {
-  const trimmed = text.trim();
-  if (/(?:\.{2,}|…)["”’')\]]*$/u.test(trimmed)) return false;
-  return /[.!?]["”’')\]]*$/u.test(trimmed);
-}
-
-function thoughtLabel(text: string): string {
-  const normalized = text.replace(/\s+/g, ' ').trim();
-  return normalized.length > 96 ? `${normalized.slice(0, 93).trimEnd()}…` : normalized;
-}
-
-export function buildDefaultThoughtAnchors(segments: ReviewSegment[]): ReviewThoughtAnchor[] {
-  const ordered = [...segments].sort((a, b) => a.sourceStartMs - b.sourceStartMs);
-  const anchors: ReviewThoughtAnchor[] = [];
-  let group: ReviewSegment[] = [];
-
-  const finishGroup = () => {
-    const first = group[0];
-    const last = group.at(-1);
-    if (!first || !last) return;
-    anchors.push({
-      id: `thought-${first.sequence}-${last.sequence}`,
-      label: thoughtLabel(group.map((segment) => segment.text).join(' ')),
-      sourceStartMs: first.sourceStartMs,
-      sourceEndMs: last.sourceEndMs,
-    });
-    group = [];
-  };
-
-  for (const segment of ordered) {
-    group.push(segment);
-    const groupStartMs = group[0]?.sourceStartMs ?? segment.sourceStartMs;
-    if (closesThought(segment.text) || segment.sourceEndMs - groupStartMs >= 20_000) {
-      finishGroup();
-    }
-  }
-  finishGroup();
-  return anchors;
-}
-
-export function thoughtAnchorAtSource(
-  anchors: ReviewThoughtAnchor[],
-  sourceMs: number,
-): ReviewThoughtAnchor | undefined {
-  return (
-    anchors.find((anchor) => sourceMs >= anchor.sourceStartMs && sourceMs < anchor.sourceEndMs) ??
-    [...anchors].reverse().find((anchor) => sourceMs >= anchor.sourceStartMs) ??
-    anchors[0]
-  );
-}
-
 export function sourceTimeAtAudio(track: ReviewTrack, audioMs: number): number {
   const segment = segmentAtAudioTime(track, audioMs);
   if (!segment) return 0;
@@ -171,22 +107,6 @@ export function audioTimeAtSource(track: ReviewTrack, sourceMs: number): number 
   if (!segment) return 0;
   const ratio = progress(sourceMs, segment.sourceStartMs, segment.sourceEndMs);
   return segment.audioStartMs + ratio * (segment.audioEndMs - segment.audioStartMs);
-}
-
-export function thoughtAlignedAudioTime(
-  currentTrack: ReviewTrack,
-  nextTrack: ReviewTrack,
-  currentAudioMs: number,
-  anchors: ReviewThoughtAnchor[],
-): ThoughtAlignedPosition {
-  const exactSourceMs = sourceTimeAtAudio(currentTrack, currentAudioMs);
-  const anchor = thoughtAnchorAtSource(anchors, exactSourceMs);
-  const sourceMs = anchor?.sourceStartMs ?? exactSourceMs;
-  return {
-    audioMs: audioTimeAtSource(nextTrack, sourceMs),
-    sourceMs,
-    anchor,
-  };
 }
 
 export function wordAudioTime(

@@ -3,11 +3,9 @@ import type { PipelineLatencySample, TranscriptSegment } from '@multilinguum/pro
 import {
   activeWordIndex,
   audioTimeAtSource,
-  buildDefaultThoughtAnchors,
   buildReviewTrack,
   parseJsonLines,
   sourceTimeAtAudio,
-  thoughtAlignedAudioTime,
   wordAudioTime,
 } from './archiveReviewModel';
 
@@ -79,54 +77,6 @@ describe('archive review alignment', () => {
     const sourceMs = sourceTimeAtAudio(english, 1_000);
     expect(sourceMs).toBe(11_500);
     expect(audioTimeAtSource(russian, sourceMs)).toBe(11_500);
-  });
-
-  it('switches at the beginning of the matching thought instead of matching elapsed seconds', () => {
-    const english = buildReviewTrack('en', 'channel-en', 'blob:en', transcript, latency, 'ru');
-    const russian = buildReviewTrack(
-      'ru',
-      'channel-ru',
-      'blob:ru',
-      transcript.map((segment) => ({ ...segment, channelId: 'channel-ru', language: 'ru' })),
-      [],
-      'ru',
-    );
-    const anchors = [
-      {
-        id: 'three-questions',
-        label: 'The three questions',
-        sourceStartMs: 10_000,
-        sourceEndMs: 17_000,
-      },
-    ];
-
-    expect(thoughtAlignedAudioTime(english, russian, 3_500, anchors)).toMatchObject({
-      audioMs: 10_000,
-      sourceMs: 10_000,
-      anchor: anchors[0],
-    });
-  });
-
-  it('groups unfinished streaming fragments into reusable default thought anchors', () => {
-    const track = buildReviewTrack(
-      'en',
-      'channel-en',
-      'blob:en',
-      [
-        { ...transcript[0]!, text: 'This thought continues...' },
-        { ...transcript[1]!, text: 'and now it resolves.' },
-      ],
-      latency,
-      'ru',
-    );
-
-    expect(buildDefaultThoughtAnchors(track.segments)).toEqual([
-      expect.objectContaining({
-        id: 'thought-4-5',
-        sourceStartMs: 10_000,
-        sourceEndMs: 17_000,
-      }),
-    ]);
   });
 
   it('seeks and highlights approximate word positions inside rendered speech', () => {
