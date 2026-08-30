@@ -12,6 +12,22 @@ describe('OpenAI cascade narration preparation', () => {
     expect(normalizeNarrationText('He **implores** believers.')).toBe('He implores believers.');
   });
 
+  it('does not turn a rhetorical setup into an audible trailing-off ellipsis', () => {
+    const setup: NarrationPlan = {
+      role: 'contrast',
+      cadence: 'flowing',
+      arc: 'setup',
+      pauseBefore: 'none',
+      pauseAfter: 'connected',
+      emphasis: [],
+      beats: [{ text: 'what we', function: 'setup', strength: 'restrained' }],
+    };
+    expect(normalizeNarrationText('but first of all with what we...', setup)).toBe(
+      'but first of all with what we',
+    );
+    expect(deliveryInstructions(undefined, setup)).toContain('without trailing off or fading');
+  });
+
   it('turns source delivery measurements into bounded speech direction', () => {
     const delivery: SourceDelivery = {
       pace: 'animated',

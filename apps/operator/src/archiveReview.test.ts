@@ -85,6 +85,32 @@ describe('archive review alignment', () => {
     expect(activeWordIndex(track.segments[0]!, 1_500, 3)).toBe(2);
   });
 
+  it('prefers measured word timestamps when an archive provides them', () => {
+    const track = buildReviewTrack(
+      'ru',
+      'channel-ru',
+      'blob:ru',
+      [
+        {
+          ...transcript[0]!,
+          channelId: 'channel-ru',
+          language: 'ru',
+          text: 'Что мы понимаем',
+          wordTimings: [
+            { text: 'Что', audioStartMs: 10_220, audioEndMs: 10_510 },
+            { text: 'мы', audioStartMs: 10_880, audioEndMs: 11_020 },
+            { text: 'понимаем', audioStartMs: 11_610, audioEndMs: 12_340 },
+          ],
+        },
+      ],
+      [],
+      'ru',
+    );
+
+    expect(wordAudioTime(track.segments[0]!, 2, 3)).toBe(11_610);
+    expect(activeWordIndex(track.segments[0]!, 11_800, 3)).toBe(2);
+  });
+
   it('parses retained JSONL with blank lines', () => {
     expect(parseJsonLines<{ value: number }>('{"value":1}\n\n{"value":2}\n')).toEqual([
       { value: 1 },

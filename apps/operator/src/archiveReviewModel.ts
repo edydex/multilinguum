@@ -1,6 +1,16 @@
 import type { Language, PipelineLatencySample, TranscriptSegment } from '@multilinguum/protocol';
 
-export interface ReviewSegment extends TranscriptSegment {
+export interface ReviewWordTiming {
+  text: string;
+  audioStartMs: number;
+  audioEndMs: number;
+}
+
+export interface ReviewTranscriptSegment extends TranscriptSegment {
+  wordTimings?: ReviewWordTiming[];
+}
+
+export interface ReviewSegment extends ReviewTranscriptSegment {
   audioStartMs: number;
   audioEndMs: number;
 }
@@ -25,7 +35,7 @@ export function buildReviewTrack(
   language: Language,
   channelId: string,
   audioUrl: string,
-  transcript: TranscriptSegment[],
+  transcript: ReviewTranscriptSegment[],
   latency: PipelineLatencySample[],
   sourceLanguage: Language,
 ): ReviewTrack {
@@ -114,6 +124,8 @@ export function wordAudioTime(
   wordIndex: number,
   wordCount: number,
 ): number {
+  const measured = segment.wordTimings?.[wordIndex];
+  if (measured) return measured.audioStartMs;
   if (wordCount <= 1) return segment.audioStartMs;
   const ratio = Math.max(0, Math.min(1, wordIndex / wordCount));
   return segment.audioStartMs + ratio * (segment.audioEndMs - segment.audioStartMs);
@@ -124,6 +136,16 @@ export function activeWordIndex(
   audioMs: number,
   wordCount: number,
 ): number {
+  if (segment.wordTimings?.length) {
+    const exact = segment.wordTimings.findIndex(
+      (word) => audioMs >= word.audioStartMs && audioMs < word.audioEndMs,
+    );
+    if (exact >= 0) return exact;
+    const prior = [...segment.wordTimings]
+      .reverse()
+      .findIndex((word) => audioMs >= word.audioStartMs);
+    return prior < 0 ? 0 : segment.wordTimings.length - 1 - prior;
+  }
   if (wordCount <= 1) return 0;
   const ratio = progress(audioMs, segment.audioStartMs, segment.audioEndMs);
   return Math.min(wordCount - 1, Math.floor(ratio * wordCount));

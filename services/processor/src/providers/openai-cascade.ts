@@ -129,13 +129,17 @@ function glossaryText(glossary: Readonly<Record<string, string>>): string {
     .join('\n');
 }
 
-export function normalizeNarrationText(text: string): string {
-  return text
+export function normalizeNarrationText(text: string, plan?: NarrationPlan): string {
+  const normalized = text
     .replace(/\*\*|__/gu, '')
     .replace(/[\r\n]+/gu, ' ')
     .replace(/\s+/gu, ' ')
     .replace(/\s+([,.;:!?])/gu, '$1')
     .trim();
+  if (plan?.pauseAfter === 'connected' || plan?.arc === 'setup' || plan?.arc === 'build') {
+    return normalized.replace(/\s*(?:\.{3,}|…)+["”’')\]]*$/u, '').trimEnd();
+  }
+  return normalized;
 }
 
 export function sanitizeNarrationPlan(text: string, plan: NarrationPlan): NarrationPlan {
@@ -212,9 +216,9 @@ export function deliveryInstructions(
   const arc = {
     standalone: 'Deliver this as a self-contained thought.',
     setup:
-      'This is a restrained setup for a later point. Keep the ending open and do not spend the strongest stress yet.',
+      'This is a restrained setup for a later point. Keep the ending open without trailing off or fading, and do not spend the strongest stress yet.',
     build:
-      'This builds a contrast that is not complete yet. Increase focus slightly, but keep the ending unresolved for the following segment.',
+      'This builds a contrast that is not complete yet. Increase focus slightly, but keep the ending unresolved without trailing off or fading.',
     climax:
       'This is the semantic climax. Let the setup breathe, then make the marked English focus unmistakable.',
     resolution:
@@ -276,6 +280,11 @@ export class OpenAITextTranslationProvider implements TranslationProvider {
         'continuous, narrator-ready sentence or thought: fold isolated emphasis words into the ' +
         'surrounding thought and express their relationship with natural commas, em dashes, ' +
         'colons, question marks, or exclamation marks when the speech supports them. Do not use ' +
+        'an ellipsis to represent an emphatic or rhetorical pause, an unfinished streaming window, ' +
+        'or anticipation of the next phrase. For a continuing thought, omit trailing-off punctuation ' +
+        'and use arc=setup or arc=build with pauseAfter=connected. When a rhetorical pause prepares ' +
+        'two or more parallel focus words, mark those target-language words as separate delivery ' +
+        'beats with audible semantic stress rather than copying the pause position. Do not use ' +
         'line breaks or turn recognition-window boundaries into paragraph boundaries. Streaming ' +
         'transcripts can repeat or damage a ' +
         'short phrase at a window boundary; when the reference notes clearly match the spoken ' +
@@ -328,7 +337,7 @@ export class OpenAITextTranslationProvider implements TranslationProvider {
       ].join('\n\n'),
     });
     const result = translationResultSchema.parse(JSON.parse(response.output_text));
-    const text = normalizeNarrationText(result.translation);
+    const text = normalizeNarrationText(result.translation, result.narrationPlan);
     if (!text) {
       throw new Error('OpenAI returned an empty translation.');
     }

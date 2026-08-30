@@ -34,6 +34,7 @@ function formatTime(milliseconds: number): string {
 }
 
 function words(segment: ReviewSegment): string[] {
+  if (segment.wordTimings?.length) return segment.wordTimings.map((word) => word.text);
   return segment.text.trim().split(/\s+/).filter(Boolean);
 }
 
