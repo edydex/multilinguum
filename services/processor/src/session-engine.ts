@@ -171,6 +171,7 @@ export class SessionEngine {
       createdAt,
       relayRoom: `service-${id}`,
       contextDocumentIds: parsed.contextDocumentIds,
+      ...(parsed.serviceReference ? { serviceReference: parsed.serviceReference } : {}),
       shareSermonNotesWithEconomy:
         profile?.info.id === 'economy' &&
         parsed.shareSermonNotesWithEconomy &&

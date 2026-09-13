@@ -5,6 +5,13 @@ import type {
   TranslationProfileId,
   TranslationProfileInfo,
 } from '@multilinguum/protocol';
+import {
+  sameSettings,
+  serviceReference,
+  type ServicePlanOptions,
+  type ServiceTranslationPlan,
+  type TranslationSettings,
+} from './servicePlans';
 import { api, operatorUrl, subscribe } from './api';
 import { useAudioMeter } from './useAudioMeter';
 import { useAudioStreamer } from './useAudioStreamer';
@@ -15,7 +22,7 @@ export interface ControlLease {
   expiresAtUnixMs: number;
   apiBase: string;
 }
-export interface ManagedOperatorOptions {
+export interface ManagedOperatorOptions extends ServicePlanOptions {
   initialLease: ControlLease;
   requestAccess(): Promise<ControlLease>;
 }
@@ -27,7 +34,13 @@ type Preflight = {
 };
 const names = { en: 'English', ru: 'Russian', es: 'Spanish', uk: 'Ukrainian' };
 
-export function ManagedOperator({ initialLease, requestAccess }: ManagedOperatorOptions) {
+export function ManagedOperator({
+  initialLease,
+  requestAccess,
+  loadServicePlans,
+  saveServicePlan,
+  preferredServiceId,
+}: ManagedOperatorOptions) {
   const [lease, setLease] = useState(initialLease);
   const [accessError, setAccessError] = useState('');
   const [error, setError] = useState('');
@@ -38,6 +51,11 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
   const [preflight, setPreflight] = useState<Preflight>();
   const [connected, setConnected] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [plans, setPlans] = useState<ServiceTranslationPlan[]>([]);
+  const [serviceId, setServiceId] = useState(preferredServiceId ?? '');
+  const [planBusy, setPlanBusy] = useState(Boolean(loadServicePlans));
+  const [planError, setPlanError] = useState('');
+  const [planNotice, setPlanNotice] = useState('');
   const [source, setSource] = useState<'en' | 'ru'>('en');
   const [speech, setSpeech] = useState(false);
   const [profileId, setProfileId] = useState<TranslationProfileId>('quality');
@@ -57,6 +75,80 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
   const live = session?.state === 'live';
   const locked = Boolean(session && !['completed', 'failed'].includes(session.state));
   const expired = lease.expiresAtUnixMs <= Date.now();
+  const selectedService = plans.find((plan) => plan.id === serviceId);
+  const settings: TranslationSettings = {
+    sourceLanguage: source,
+    translationProfile: profileId,
+    speechEnabled: speech,
+    contextDocumentIds: useNotes ? noteIds : [],
+  };
+  const planReady =
+    !serviceId ||
+    Boolean(
+      selectedService?.revision &&
+      !selectedService.stale &&
+      sameSettings(settings, selectedService.settings),
+    );
+  const latestLocked = useRef(locked);
+  latestLocked.current = locked;
+  function applyPlan(plan: ServiceTranslationPlan | undefined) {
+    setShareNotes(false);
+    if (plan?.settings && !latestLocked.current) {
+      setSource(plan.settings.sourceLanguage);
+      setProfileId(plan.settings.translationProfile);
+      setSpeech(plan.settings.speechEnabled);
+      setNoteIds(plan.settings.contextDocumentIds);
+      setUseNotes(plan.settings.contextDocumentIds.length > 0);
+    }
+  }
+  async function reloadPlans() {
+    if (!loadServicePlans || planBusy || busy || locked) return;
+    setPlanBusy(true);
+    setPlanError('');
+    setPlanNotice('');
+    try {
+      const list = await loadServicePlans();
+      const exact = serviceId ? await loadServicePlans(serviceId) : undefined;
+      const values = [
+        ...list.services.filter((item) => item.id !== serviceId),
+        ...(exact?.services ?? []),
+      ];
+      setPlans(values);
+      applyPlan(values.find((item) => item.id === serviceId));
+      setError('');
+    } catch (cause) {
+      setPlanError(cause instanceof Error ? cause.message : 'Could not load prepared services.');
+    } finally {
+      setPlanBusy(false);
+    }
+  }
+  useEffect(() => {
+    if (!loadServicePlans) return;
+    let stopped = false;
+    void (async () => {
+      try {
+        const list = await loadServicePlans();
+        const exact = preferredServiceId ? await loadServicePlans(preferredServiceId) : undefined;
+        if (stopped) return;
+        const values = [
+          ...list.services.filter((item) => item.id !== preferredServiceId),
+          ...(exact?.services ?? []),
+        ];
+        setPlans(values);
+        applyPlan(values.find((item) => item.id === preferredServiceId));
+      } catch (cause) {
+        if (!stopped)
+          setPlanError(
+            cause instanceof Error ? cause.message : 'Could not load prepared services.',
+          );
+      } finally {
+        if (!stopped) setPlanBusy(false);
+      }
+    })();
+    return () => {
+      stopped = true;
+    };
+  }, [loadServicePlans, preferredServiceId]);
   const audio = useAudioMeter(
     deviceId,
     captureRequested && !expired,
@@ -184,7 +276,22 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
   }
   async function start() {
     if (!locked) {
+      if (serviceId && (!selectedService || !loadServicePlans || !planReady))
+        throw new Error(
+          'Review and save the translation settings for this service before starting.',
+        );
+      const reference =
+        selectedService && loadServicePlans
+          ? serviceReference(
+              selectedService,
+              (await loadServicePlans(selectedService.id)).services.find(
+                (item) => item.id === selectedService.id,
+              ),
+              settings,
+            )
+          : undefined;
       await api.create(connection, {
+        ...(reference ? { serviceReference: reference } : {}),
         translationProfile: profileId,
         sourceLanguage: source,
         targets: (['en', 'ru'] as const).map((language) => ({
@@ -263,11 +370,115 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
       <div className="setup-grid">
         <section className="card">
           <h2>Translation</h2>
+          {loadServicePlans && saveServicePlan && (
+            <section aria-label="Prepared service">
+              <label>
+                Prepared service
+                <select
+                  value={serviceId}
+                  disabled={locked || busy || planBusy}
+                  onChange={(event) => {
+                    if (
+                      selectedService &&
+                      !sameSettings(settings, selectedService.settings) &&
+                      !window.confirm(
+                        'Discard unsaved translation settings and choose another service?',
+                      )
+                    )
+                      return;
+                    setServiceId(event.target.value);
+                    setPlanNotice('');
+                    setPlanError('');
+                    applyPlan(plans.find((plan) => plan.id === event.target.value));
+                  }}
+                >
+                  <option value="">Unplanned service</option>
+                  {serviceId && !selectedService && (
+                    <option value={serviceId}>Selected service unavailable</option>
+                  )}
+                  {plans.map((plan) => (
+                    <option key={plan.id} value={plan.id}>
+                      {plan.serviceDate} · {plan.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {locked && session?.serviceReference && (
+                <p className="hint">
+                  Running service: {session.serviceReference.title} ·{' '}
+                  {session.serviceReference.serviceDate}
+                </p>
+              )}
+              {!locked && selectedService && (
+                <p className="hint">
+                  {selectedService.stale
+                    ? 'The service changed after these choices were saved. Review them and save again.'
+                    : planReady
+                      ? 'Saved translation settings loaded.'
+                      : 'Review the choices below, then save for this service.'}
+                </p>
+              )}
+              {planError && (
+                <p className="notice" role="alert">
+                  {planError}
+                </p>
+              )}
+              {planNotice && <p role="status">{planNotice}</p>}
+              <div className="actions">
+                <button
+                  disabled={
+                    locked || busy || planBusy || !selectedService || (useNotes && !noteIds.length)
+                  }
+                  onClick={() =>
+                    void act(async () => {
+                      if (!selectedService) return;
+                      const result = await saveServicePlan({
+                        serviceId: selectedService.id,
+                        serviceRevision: selectedService.serviceRevision,
+                        baseRevision: selectedService.revision,
+                        settings,
+                      });
+                      setPlans((previous) =>
+                        previous.map((plan) =>
+                          plan.id === result.service.id ? result.service : plan,
+                        ),
+                      );
+                      setPlanNotice('Translation settings saved for this service.');
+                      setPlanError('');
+                    })
+                  }
+                >
+                  Save for this service
+                </button>
+                <button
+                  disabled={locked || busy || planBusy}
+                  onClick={() => {
+                    if (
+                      selectedService &&
+                      !sameSettings(settings, selectedService.settings) &&
+                      !window.confirm(
+                        'Discard unsaved translation settings and reload this service?',
+                      )
+                    )
+                      return;
+                    void reloadPlans();
+                  }}
+                >
+                  {planBusy ? 'Loading services…' : 'Reload services'}
+                </button>
+              </div>
+              <p className="hint">
+                Saving does not start translation or connect a microphone. Economy’s note-sharing
+                choice is made for each session.
+              </p>
+            </section>
+          )}
+
           <label>
             Speaker’s language
             <select
               value={shownSource}
-              disabled={locked || busy}
+              disabled={locked || busy || planBusy}
               onChange={(event) => setSource(event.target.value as 'en' | 'ru')}
             >
               <option value="en">English → Russian</option>
@@ -278,7 +489,7 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
             Translation quality
             <select
               value={locked && !selectedProfile ? 'legacy' : (selectedProfile?.id ?? profileId)}
-              disabled={locked || busy}
+              disabled={locked || busy || planBusy}
               onChange={(event) => setProfileId(event.target.value as TranslationProfileId)}
             >
               {locked && !selectedProfile && (
@@ -335,6 +546,12 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
               Update the translation processor to enable Quality and Economy.
             </p>
           )}
+          {!locked && useNotes && profileId === 'economy' && !shareNotes && (
+            <p className="hint">
+              Before starting, open Sermon notes and choose whether to share the selected notes with
+              Economy, or turn notes off.
+            </p>
+          )}
           <details className="sermon-notes">
             <summary>
               Sermon notes · {shownNoteIds.length ? `${shownNoteIds.length} selected` : 'Optional'}
@@ -347,7 +564,7 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
               <input
                 type="checkbox"
                 checked={locked ? shownNoteIds.length > 0 : useNotes}
-                disabled={locked || busy}
+                disabled={locked || busy || planBusy}
                 onChange={(event) => {
                   setUseNotes(event.target.checked);
                   setShareNotes(false);
@@ -367,7 +584,7 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
                   <input
                     type="file"
                     accept=".pdf,.txt,application/pdf,text/plain"
-                    disabled={locked || busy || expired}
+                    disabled={locked || busy || planBusy || expired}
                     onChange={(event) => {
                       const file = event.target.files?.[0];
                       event.target.value = '';
@@ -398,7 +615,10 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
                       type="checkbox"
                       checked={shownNoteIds.includes(document.id)}
                       disabled={
-                        locked || busy || (!noteIds.includes(document.id) && noteIds.length >= 8)
+                        locked ||
+                        busy ||
+                        planBusy ||
+                        (!noteIds.includes(document.id) && noteIds.length >= 8)
                       }
                       onChange={(event) =>
                         setNoteIds((previous) =>
@@ -421,7 +641,7 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
                     <input
                       type="checkbox"
                       checked={locked ? session?.shareSermonNotesWithEconomy === true : shareNotes}
-                      disabled={locked || busy || !noteIds.length}
+                      disabled={locked || busy || planBusy || !noteIds.length}
                       onChange={(event) => setShareNotes(event.target.checked)}
                     />
                     Share selected notes with Economy for this service
@@ -449,6 +669,7 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
               disabled={
                 busy ||
                 expired ||
+                planBusy ||
                 (!speechEnabled && !preflight?.livekit?.configured) ||
                 (locked && !live)
               }
@@ -469,6 +690,8 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
                   expired ||
                   !profileReady ||
                   !notesReady ||
+                  planBusy ||
+                  (!locked && !planReady) ||
                   (locked && session?.state !== 'preflight')
                 }
                 onClick={() => void act(start)}

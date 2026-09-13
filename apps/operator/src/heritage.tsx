@@ -2,6 +2,7 @@ import { createRoot } from 'react-dom/client';
 import { ManagedOperator, type ManagedOperatorOptions } from './ManagedOperator';
 import styles from './managed.css?inline';
 export const clientVersion = 1;
+export const servicePlanVersion = 1;
 export function mount(element: HTMLElement, options: ManagedOperatorOptions): () => void {
   const shadow = element.shadowRoot ?? element.attachShadow({ mode: 'open' });
   const style = document.createElement('style');

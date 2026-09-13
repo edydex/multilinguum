@@ -66,7 +66,18 @@ export interface ContextDocument {
   characterCount: number;
 }
 
+/** Operator-declared link to the reviewed Community service, retained privately with the session. */
+export interface ServiceReference {
+  communityId: string;
+  serviceId: string;
+  title: string;
+  serviceDate: string;
+  serviceRevision: string;
+  planRevision: number;
+}
+
 export interface ServiceSession {
+  serviceReference?: ServiceReference;
   id: string;
   state: SessionState;
   sourceLanguage: 'en' | 'ru';
