@@ -190,17 +190,20 @@ export class FileArchiveStore implements ArchiveStore {
         await unlink(pcmPath);
       }),
     );
-    const audioTracks = await Promise.all(
-      manifest.audioTracks.map(async (track) => {
-        const filePath = path.join(this.#sessionRoot(sessionId), track.path);
-        try {
-          await stat(filePath);
-          return { ...track, sha256: await sha256File(filePath) };
-        } catch {
-          return track;
-        }
-      }),
-    );
+    const audioTracks = (
+      await Promise.all(
+        manifest.audioTracks.map(async (track) => {
+          const filePath = path.join(this.#sessionRoot(sessionId), track.path);
+          try {
+            await stat(filePath);
+            return { ...track, sha256: await sha256File(filePath) };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            return undefined;
+          }
+        }),
+      )
+    ).filter((track): track is NonNullable<typeof track> => track !== undefined);
     const transcripts = await Promise.all(
       manifest.transcripts.map(async (transcript) => {
         const filePath = path.join(this.#sessionRoot(sessionId), transcript.path);

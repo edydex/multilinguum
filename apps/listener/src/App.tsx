@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { RemoteAudioTrack, Room } from 'livekit-client';
+import { useLiveAudio } from './useLiveAudio';
 import type {
   Language,
   ProcessorEvent,
@@ -22,12 +22,6 @@ const names: Record<Language, string> = {
 };
 
 const apiBase = import.meta.env.VITE_PROCESSOR_PUBLIC_URL ?? window.location.origin;
-
-interface TokenResponse {
-  url: string;
-  token: string;
-  expiresInSeconds: number;
-}
 
 function CaptionWords({ segment, now }: { segment: TranscriptSegment; now: number }) {
   const playout = segment.playout;
@@ -62,17 +56,22 @@ export function App() {
   });
   const [language, setLanguage] = useState<Language>();
   const [captions, setCaptions] = useState<Record<string, CaptionTimeline>>({});
-  const [connected, setConnected] = useState(false);
-  const [playing, setPlaying] = useState(false);
   const [captionsVisible, setCaptionsVisible] = useState(true);
   const [volume, setVolume] = useState(1);
   const [followingLive, setFollowingLive] = useState(true);
   const [clockOffsetMs, setClockOffsetMs] = useState(0);
   const [captionClock, setCaptionClock] = useState(Date.now());
-  const [error, setError] = useState<string>();
-  const roomRef = useRef<Room | undefined>(undefined);
-  const audioRef = useRef<HTMLAudioElement | undefined>(undefined);
-  const tracksRef = useRef(new Map<Language, RemoteAudioTrack>());
+  const selectedChannel = service.languages.find((item) => item.language === language);
+  const audioAvailable = Boolean(
+    service.active && selectedChannel?.available && selectedChannel.audioAvailable !== false,
+  );
+  const {
+    connected,
+    playing,
+    connecting,
+    error,
+    toggle: beginListening,
+  } = useLiveAudio(apiBase, language, audioAvailable, volume);
   const captionViewportRef = useRef<HTMLDivElement | null>(null);
   const captionSegmentRefs = useRef(new Map<number, HTMLElement>());
   const followingLiveRef = useRef(true);
@@ -145,97 +144,16 @@ export function App() {
     return () => window.clearInterval(timer);
   }, [captionsVisible, clockOffsetMs, service.active]);
 
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (audio) audio.volume = volume;
-  }, [volume]);
-
-  useEffect(() => {
-    if (!language || !connected) return;
-    void roomRef.current?.localParticipant
-      .setMetadata(JSON.stringify({ role: 'anonymous-listener', language }))
-      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
-    const track = tracksRef.current.get(language);
-    if (!track) return;
-    audioRef.current?.remove();
-    const audio = track.attach();
-    audio.autoplay = true;
-    audio.controls = false;
-    audio.volume = volume;
-    document.body.append(audio);
-    audioRef.current = audio;
-    void audio
-      .play()
-      .then(() => setPlaying(true))
-      .catch(() => setPlaying(false));
-  }, [connected, language, volume]);
-
-  const beginListening = async () => {
-    if (!language) return;
-    if (playing && audioRef.current) {
-      audioRef.current.pause();
-      setPlaying(false);
-      return;
-    }
-    if (connected && audioRef.current) {
-      await audioRef.current.play();
-      setPlaying(true);
-      return;
-    }
-    setError(undefined);
-    try {
-      const { Room: LiveKitRoom, RoomEvent } = await import('livekit-client');
-      const tokenUrl = new URL('/api/public/token', apiBase);
-      tokenUrl.searchParams.set('language', language);
-      const response = await fetch(tokenUrl);
-      if (!response.ok) throw new Error('The audio stream is not ready yet.');
-      const credentials = (await response.json()) as TokenResponse;
-      const room = new LiveKitRoom({ adaptiveStream: true, dynacast: false });
-      roomRef.current = room;
-      room.on(RoomEvent.TrackSubscribed, (track, publication) => {
-        if (track.kind !== 'audio') return;
-        const match = publication.trackName.match(/(?:translation|source)-([a-z]{2})$/);
-        if (!match) return;
-        tracksRef.current.set(match[1] as Language, track as RemoteAudioTrack);
-        if (match[1] === language) {
-          const audio = track.attach();
-          audio.volume = volume;
-          document.body.append(audio);
-          audioRef.current = audio;
-          void audio.play().then(() => setPlaying(true));
-        }
-      });
-      room.on(RoomEvent.Reconnecting, () => setConnected(false));
-      room.on(RoomEvent.Reconnected, () => setConnected(true));
-      room.on(RoomEvent.Disconnected, () => {
-        setConnected(false);
-        setPlaying(false);
-      });
-      await room.connect(credentials.url, credentials.token, { autoSubscribe: true });
-      await room.startAudio();
-      setConnected(true);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    }
-  };
-
-  useEffect(
-    () => () => {
-      roomRef.current?.disconnect();
-      audioRef.current?.remove();
-    },
-    [],
-  );
-
-  const selectedChannel = service.languages.find((item) => item.language === language);
   const caption = language ? captions[language] : undefined;
   const visibleFinal = useMemo(
-    () => visibleCaptionSegments(caption?.final ?? [], captionClock),
-    [caption?.final, captionClock],
+    () =>
+      playing ? visibleCaptionSegments(caption?.final ?? [], captionClock) : (caption?.final ?? []),
+    [caption?.final, captionClock, playing],
   );
   const narratedSequence = useMemo(
-    () => narratedAnchorSequence(visibleFinal, captionClock),
-    [captionClock, visibleFinal],
+    () =>
+      playing ? narratedAnchorSequence(visibleFinal, captionClock) : visibleFinal.at(-1)?.sequence,
+    [captionClock, visibleFinal, playing],
   );
 
   const scrollToNarrated = useCallback(
@@ -292,9 +210,10 @@ export function App() {
   };
   const status = useMemo(() => {
     if (!service.active) return 'Service offline';
+    if (!audioAvailable) return 'Live text · Audio off';
     if (!connected) return 'Ready to connect';
     return playing ? 'Listening live' : 'Paused';
-  }, [connected, playing, service.active]);
+  }, [connected, playing, service.active, audioAvailable]);
 
   return (
     <main>
@@ -306,7 +225,9 @@ export function App() {
         <div className="church-mark">✦</div>
         <p>{service.churchName}</p>
         <h1>Live translation</h1>
-        <span className="delay">Approximately 5–20 seconds behind, depending on voice mode</span>
+        <span className="delay">
+          Live text appears as translation arrives. Audio may follow later.
+        </span>
       </header>
 
       {!service.active ? (
@@ -337,8 +258,18 @@ export function App() {
                 <i key={index} style={{ height }} />
               ))}
             </div>
-            <button className="listen" disabled={!language} onClick={() => void beginListening()}>
-              {playing ? '❚❚  Pause' : '▶  Listen'}
+            <button
+              className="listen"
+              disabled={!audioAvailable}
+              onClick={() => void beginListening()}
+            >
+              {!audioAvailable
+                ? 'Audio off'
+                : connecting
+                  ? 'Cancel connection'
+                  : playing
+                    ? '❚❚  Pause'
+                    : '▶  Listen'}
             </button>
             <label className="volume">
               Volume
@@ -354,7 +285,11 @@ export function App() {
             </label>
             <div className={`stream-status ${connected ? 'connected' : ''}`}>
               <i />
-              {connected ? 'Secure stream connected' : 'Tap Listen to connect'}
+              {!audioAvailable
+                ? 'Read live text below'
+                : connected
+                  ? 'Secure stream connected'
+                  : 'Tap Listen to connect'}
             </div>
           </section>
 
@@ -389,7 +324,11 @@ export function App() {
                         else captionSegmentRefs.current.delete(segment.sequence);
                       }}
                     >
-                      <CaptionWords segment={segment} now={captionClock} />{' '}
+                      {playing ? (
+                        <CaptionWords segment={segment} now={captionClock} />
+                      ) : (
+                        segment.text
+                      )}{' '}
                     </span>
                   ))}
                   {!caption?.final.length && !caption?.live ? (

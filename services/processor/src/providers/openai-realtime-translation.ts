@@ -24,8 +24,8 @@ export class OpenAIRealtimeTranslationChannel implements RealtimeTranslationChan
   readonly #audioListeners = new Set<(audio: RenderedSpeech) => void>();
   readonly #errorListeners = new Set<(error: Error) => void>();
   #connection: RealtimeConnection | undefined;
-  #session?: ServiceSession;
-  #channel?: ChannelConfig;
+  #session: ServiceSession | undefined;
+  #channel: ChannelConfig | undefined;
   #audioSequence = 0;
 
   constructor(
@@ -86,8 +86,18 @@ export class OpenAIRealtimeTranslationChannel implements RealtimeTranslationChan
     if (!connection) return;
     const closed = connection.waitFor('session.closed', 45_000);
     connection.send({ type: 'session.close' });
-    await closed;
-    connection.close();
+    try {
+      await closed;
+    } finally {
+      connection.close();
+    }
+  }
+
+  cancel(): void {
+    this.#connection?.close();
+    this.#connection = undefined;
+    this.#session = undefined;
+    this.#channel = undefined;
   }
 
   onTranscriptDelta(listener: (delta: RealtimeTranscriptDelta) => void): () => void {

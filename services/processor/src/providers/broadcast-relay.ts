@@ -47,6 +47,8 @@ export class BroadcastMediaRelay implements MediaRelay {
     return 0;
   }
 
+  clearAudio(_channelId: string): void {}
+
   async publishCaption(segment: TranscriptSegment): Promise<void> {
     this.#broadcast({ type: 'transcript', segment });
   }

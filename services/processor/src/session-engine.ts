@@ -54,6 +54,8 @@ interface RuntimeChannel {
   latencySamples: PipelineLatencySample[];
   audioChain: Promise<void>;
   pendingAudioEstimateMs: number;
+  audioGeneration: number;
+  speechAbort: AbortController;
   lastFinalCaptionSequence: number;
   lastProvisionalSequence: number;
   lastProvisionalRevision: number;
@@ -104,6 +106,7 @@ export class SessionEngine {
       voiceMode: target.voiceMode,
       fallbackOrder: target.fallbackOrder,
       muted: target.muted,
+      speechEnabled: target.speechEnabled,
       ...(target.voiceProfileId ? { voiceProfileId: target.voiceProfileId } : {}),
     }));
     const targetLanguages = targets.map((target) => target.targetLanguage);
@@ -156,6 +159,8 @@ export class SessionEngine {
         latencySamples: [],
         audioChain: Promise.resolve(),
         pendingAudioEstimateMs: 0,
+        audioGeneration: 0,
+        speechAbort: new AbortController(),
         lastFinalCaptionSequence: -1,
         lastProvisionalSequence: -1,
         lastProvisionalRevision: -1,
@@ -411,9 +416,12 @@ export class SessionEngine {
     ) {
       throw new Error('Channel is not an active natural-voice Realtime channel.');
     }
-    if (runtime.config.muted) return;
+    if (!this.#audioEnabled(runtime)) return;
+    const generation = runtime.audioGeneration;
     await this.#dependencies.archive.appendAudio(session.id, channelId, audio);
+    if (generation !== runtime.audioGeneration || !this.#audioEnabled(runtime)) return;
     await this.#dependencies.relay.publishAudio(channelId, audio);
+    if (generation !== runtime.audioGeneration) return;
     const expectedAt = Date.parse(session.startedAt ?? session.createdAt) + audio.startMs;
     const latencyMs = Math.max(0, Date.now() - expectedAt);
     runtime.health = {
@@ -441,6 +449,8 @@ export class SessionEngine {
       (channel) => channel.config.voiceMode === 'source',
     );
     if (!sourceChannel) throw new Error('Session has no delayed source-audio channel.');
+    if (!this.#audioEnabled(sourceChannel)) return;
+    const generation = sourceChannel.audioGeneration;
     const audio = {
       data: input.data,
       encoding: 'pcm_s16le' as const,
@@ -452,8 +462,10 @@ export class SessionEngine {
       renderer: 'delayed-original',
     };
     await this.#dependencies.archive.appendAudio(session.id, sourceChannel.config.id, audio);
+    if (generation !== sourceChannel.audioGeneration || !this.#audioEnabled(sourceChannel)) return;
     const publishStartedAtUnixMs = Date.now();
     await this.#dependencies.relay.publishAudio(sourceChannel.config.id, audio);
+    if (generation !== sourceChannel.audioGeneration) return;
     const publishCompletedAtUnixMs = Date.now();
     this.#sourceAudioSpans.set(input.sequence, {
       startedAtUnixMs: publishStartedAtUnixMs,
@@ -475,9 +487,58 @@ export class SessionEngine {
   async setMuted(channelId: string, muted: boolean): Promise<ChannelHealth> {
     const channel = this.#requiredChannel(channelId);
     channel.config = { ...channel.config, muted };
+    if (muted) this.#cancelAudio(channel);
+    this.#syncChannelConfig(channel);
     channel.health = { ...channel.health, state: muted ? 'muted' : 'healthy' };
     this.#emitHealth(channel);
     return channel.health;
+  }
+
+  async setSpeechEnabled(channelId: string, enabled: boolean): Promise<ChannelHealth> {
+    const channel = this.#requiredChannel(channelId);
+    this.#cancelAudio(channel);
+    const generation = channel.audioGeneration;
+    // Report off immediately; turning on is only committed after the relay is ready.
+    channel.config = { ...channel.config, speechEnabled: false };
+    this.#syncChannelConfig(channel);
+    if (enabled) {
+      await this.#dependencies.relay.publishChannel({ ...channel.config, speechEnabled: true });
+      if (generation !== channel.audioGeneration) return channel.health;
+      channel.config = { ...channel.config, speechEnabled: true };
+      this.#syncChannelConfig(channel);
+    }
+    channel.health = {
+      ...channel.health,
+      backlogMs: 0,
+      state: channel.config.muted ? 'muted' : 'healthy',
+    };
+    this.#emitHealth(channel);
+    return channel.health;
+  }
+
+  #syncChannelConfig(channel: RuntimeChannel): void {
+    const session = this.#requiredSession();
+    this.#session = {
+      ...session,
+      targets: session.targets.map((target) =>
+        target.id === channel.config.id ? channel.config : target,
+      ),
+    };
+    this.#emitSession();
+  }
+
+  #audioEnabled(channel: RuntimeChannel): boolean {
+    return !channel.config.muted && channel.config.speechEnabled !== false;
+  }
+
+  #cancelAudio(channel: RuntimeChannel): void {
+    channel.audioGeneration += 1;
+    channel.speechAbort.abort();
+    channel.speechAbort = new AbortController();
+    channel.pendingAudioEstimateMs = 0;
+    // Old work is fenced even if a provider ignores cancellation. New speech does not wait for it.
+    channel.audioChain = Promise.resolve();
+    this.#dependencies.relay.clearAudio(channel.config.id);
   }
 
   async forceNatural(channelId: string): Promise<ChannelHealth> {
@@ -531,6 +592,7 @@ export class SessionEngine {
     followingText?: string,
   ): Promise<TranscriptSegment | undefined> {
     if (runtime.config.muted) return undefined;
+    const audioGeneration = runtime.audioGeneration;
     const session = this.#requiredSession();
     let translation: LatencySpan | undefined;
     let captionPublish: LatencySpan | undefined;
@@ -579,7 +641,18 @@ export class SessionEngine {
       );
       await this.#dependencies.archive.appendTranscript(finalCaption);
 
-      if (runtime.effectiveVoiceMode !== 'source') {
+      const captionStartedAtUnixMs = Date.now();
+      await this.#dependencies.relay.publishCaption(finalCaption);
+      captionPublish = {
+        startedAtUnixMs: captionStartedAtUnixMs,
+        completedAtUnixMs: Date.now(),
+      };
+
+      if (
+        runtime.effectiveVoiceMode !== 'source' &&
+        this.#audioEnabled(runtime) &&
+        audioGeneration === runtime.audioGeneration
+      ) {
         this.#enqueueSpeech({
           runtime,
           source,
@@ -607,13 +680,6 @@ export class SessionEngine {
         return finalCaption;
       }
 
-      const captionStartedAtUnixMs = Date.now();
-      await this.#dependencies.relay.publishCaption(finalCaption);
-      captionPublish = {
-        startedAtUnixMs: captionStartedAtUnixMs,
-        completedAtUnixMs: Date.now(),
-      };
-
       const sample = this.#latencySample({
         runtime,
         source,
@@ -631,7 +697,6 @@ export class SessionEngine {
         ...runtime.health,
         state: 'healthy',
         lastTranscriptAt: now,
-        ...(runtime.effectiveVoiceMode === 'source' ? {} : { lastAudioAt: now }),
         latencyMs: Math.max(0, measuredLatency),
         backlogMs,
         engine: `${this.#translationProvider(runtime.config).name}+${runtime.effectiveVoiceMode}`,
@@ -688,6 +753,9 @@ export class SessionEngine {
     translation?: LatencySpan | undefined;
   }): void {
     const session = this.#requiredSession();
+    const generation = input.runtime.audioGeneration;
+    const isCurrent = () =>
+      generation === input.runtime.audioGeneration && this.#audioEnabled(input.runtime);
     const estimateMs = estimateSpeechDurationMs(input.translated.text);
     const playbackBacklogMs = this.#playbackBacklogMs(input.runtime);
     const trailingPauseMs = targetTrailingPauseMs(
@@ -700,6 +768,7 @@ export class SessionEngine {
     const renderPromise = this.#render(input.runtime, input.translated, {
       playbackBacklogMs,
       sourceDelivery: input.source.sourceDelivery,
+      signal: input.runtime.speechAbort.signal,
     }).then(
       (rendered) => ({
         ok: true as const,
@@ -727,6 +796,7 @@ export class SessionEngine {
       let speechRenderer: string | undefined;
       try {
         const result = await renderPromise;
+        if (!isCurrent()) return;
         speechRender = result.speechRender;
         if (!result.ok) throw result.error;
         speechRenderer = result.rendered.renderer;
@@ -736,6 +806,7 @@ export class SessionEngine {
           input.runtime.config.id,
           result.rendered,
         );
+        if (!isCurrent()) return;
         const audioStartedAtUnixMs = Date.now();
         const queuedBeforeMs = this.#dependencies.relay.audioBacklogMs(input.runtime.config.id);
         const playoutStartAtUnixMs = audioStartedAtUnixMs + queuedBeforeMs;
@@ -751,11 +822,13 @@ export class SessionEngine {
         };
         const captionStartedAtUnixMs = Date.now();
         await this.#dependencies.relay.publishCaption(queuedCaption);
+        if (!isCurrent()) return;
         captionPublish = {
           startedAtUnixMs: captionStartedAtUnixMs,
           completedAtUnixMs: Date.now(),
         };
         await this.#dependencies.relay.publishAudio(input.runtime.config.id, result.rendered);
+        if (!isCurrent()) return;
         audioPublish = {
           startedAtUnixMs: audioStartedAtUnixMs,
           completedAtUnixMs: Date.now(),
@@ -781,6 +854,7 @@ export class SessionEngine {
           outcome: 'complete',
         });
         await this.#recordLatency(input.runtime, sample);
+        if (!isCurrent()) return;
         const measuredLatency =
           sample.metrics.sourceEndToPlayoutMs ??
           sample.metrics.sourceEndToAudioMs ??
@@ -800,6 +874,7 @@ export class SessionEngine {
         input.runtime.health = nextHealth;
         this.#emitHealth(input.runtime);
       } catch (error) {
+        if (!isCurrent()) return;
         input.runtime.pendingAudioEstimateMs = Math.max(
           0,
           input.runtime.pendingAudioEstimateMs - estimateMs,
@@ -819,9 +894,10 @@ export class SessionEngine {
           error: message,
         });
         await this.#recordLatency(input.runtime, sample).catch(() => undefined);
+        if (!isCurrent()) return;
         input.runtime.health = {
           ...input.runtime.health,
-          state: input.runtime.effectiveVoiceMode === 'cloned' ? 'degraded' : 'failed',
+          state: 'degraded',
           backlogMs: this.#playbackBacklogMs(input.runtime),
           error: message,
           ...(input.runtime.latencySamples.length > 0
@@ -951,7 +1027,11 @@ export class SessionEngine {
 
   #translationEngine(config: ChannelConfig): string {
     if (config.voiceMode === 'source') return 'delayed-original';
-    if (config.translationProvider === 'openai-realtime' && config.voiceMode === 'natural') {
+    if (
+      config.translationProvider === 'openai-realtime' &&
+      config.voiceMode === 'natural' &&
+      config.speechEnabled !== false
+    ) {
       return this.#dependencies.realtimeTranslationEngine ?? 'openai-realtime-not-configured';
     }
     return this.#translationProvider(config).name;

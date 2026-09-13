@@ -284,7 +284,10 @@ describe('OpenAI Realtime provider adapters', () => {
         (event) => (event as { type?: string }).type === 'session.input_audio_buffer.append',
       ),
     ).toBe(true);
-    await translator.stop();
+    translator.cancel();
     expect(connection.closed).toBe(true);
+    connection.emit({ type: 'session.output_transcript.delta', delta: 'Late output' });
+    expect(transcripts).toHaveLength(1);
+    await translator.stop();
   });
 });

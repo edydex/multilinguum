@@ -34,6 +34,7 @@ export interface TranslationContext {
 }
 
 export interface SpeechRenderContext {
+  signal?: AbortSignal;
   /** Audio already queued or being rendered ahead of this clause. */
   playbackBacklogMs: number;
   /** Broad source-language evidence; renderers must not mirror its word stress or pitch contour. */
@@ -65,6 +66,8 @@ export interface RealtimeTranslationChannel {
   start(session: ServiceSession, channel: ChannelConfig): Promise<void>;
   pushAudio(chunk: AudioChunk): Promise<void>;
   stop(): Promise<void>;
+  /** Immediately close the paid provider session without draining generated speech. */
+  cancel(): void;
   onTranscriptDelta(listener: (delta: RealtimeTranscriptDelta) => void): () => void;
   onAudio(listener: (audio: RenderedSpeech) => void): () => void;
   onError(listener: (error: Error) => void): () => void;
@@ -97,6 +100,8 @@ export interface MediaRelay {
   createSession(session: ServiceSession): Promise<void>;
   publishChannel(config: ChannelConfig): Promise<PublishedChannel>;
   audioBacklogMs(channelId: string): number;
+  /** Cancel queued frames and fence any publication already in progress. */
+  clearAudio(channelId: string): void;
   publishAudio(channelId: string, chunk: RenderedSpeech): Promise<void>;
   publishCaption(segment: TranscriptSegment): Promise<void>;
   closeSession(sessionId: string): Promise<void>;

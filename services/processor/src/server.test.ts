@@ -13,13 +13,14 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
 });
 
-async function testServer() {
+async function testServer(overrides: NodeJS.ProcessEnv = {}) {
   const root = await mkdtemp(path.join(tmpdir(), 'multilinguum-processor-'));
   const config = loadConfig({
     NODE_ENV: 'test',
     PROCESSOR_CONTROL_TOKEN: controlToken,
     PROCESSOR_PUBLIC_URL: 'http://127.0.0.1:4310',
     ARCHIVE_ROOT: root,
+    ...overrides,
   });
   const server = await buildServer(config);
   servers.push(server);
@@ -86,6 +87,90 @@ function sessionRequest() {
 }
 
 describe('processor vertical slice', () => {
+  it('runs text with an unreachable configured relay and reports audio controls accurately', async () => {
+    const server = await testServer({
+      LIVEKIT_URL: 'wss://relay.invalid',
+      LIVEKIT_API_KEY: 'test-key',
+      LIVEKIT_API_SECRET: 'test-secret-at-least-32-characters',
+    });
+    const request = sessionRequest();
+    const created = await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: {
+        ...request,
+        targets: request.targets
+          .slice(0, 2)
+          .map((channel) => ({ ...channel, speechEnabled: false })),
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const started = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/start',
+      headers: headers(),
+      payload: {},
+    });
+    expect(started.statusCode).toBe(200);
+    const state = (await server.inject('/api/public/service')).json();
+    expect(state.active).toBe(true);
+    expect(state.languages).toHaveLength(2);
+    expect(
+      state.languages.every(
+        (channel: { available: boolean; audioAvailable: boolean }) =>
+          channel.available && !channel.audioAvailable,
+      ),
+    ).toBe(true);
+    expect((await server.inject('/api/public/token?language=en')).statusCode).toBe(404);
+    const anonymous = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/channels/channel-en',
+      payload: { speechEnabled: true },
+    });
+    expect(anonymous.statusCode).toBe(401);
+    const replay = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/replay',
+      headers: headers(),
+      payload: {
+        segments: [
+          {
+            text: 'Благодать вам и мир от Бога Отца нашего.',
+            sourceStartMs: 0,
+            sourceEndMs: 2000,
+            final: true,
+            sequence: 0,
+          },
+        ],
+      },
+    });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json().translated).toHaveLength(2);
+    const stop = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/stop',
+      headers: headers(),
+      payload: {},
+    });
+    expect(stop.statusCode).toBe(200);
+    expect(stop.json().archive.audioTracks).toHaveLength(0);
+    expect(stop.json().archive.transcripts).toHaveLength(2);
+  });
+
+  it('allows cloud-only production configuration without a GPU-worker secret', () => {
+    expect(() =>
+      loadConfig({ NODE_ENV: 'production', PROCESSOR_CONTROL_TOKEN: controlToken }),
+    ).not.toThrow();
+    expect(() =>
+      loadConfig({
+        NODE_ENV: 'production',
+        PROCESSOR_CONTROL_TOKEN: controlToken,
+        VOICE_WORKER_URL: 'http://voice-worker:4320',
+      }),
+    ).toThrow('VOICE_WORKER_TOKEN');
+  });
+
   it('locks, translates, isolates channel state, and finalizes an archive', async () => {
     const server = await testServer();
     const unauthorized = await server.inject({ method: 'GET', url: '/api/preflight' });

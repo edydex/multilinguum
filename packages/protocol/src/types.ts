@@ -29,6 +29,8 @@ export interface ChannelConfig {
   voiceProfileId?: string;
   fallbackOrder: Array<'natural' | 'cloned' | 'mute'>;
   muted: boolean;
+  /** False disables audio generation/publication while translation continues. Omitted by older clients. */
+  speechEnabled?: boolean;
 }
 
 export interface ContextDocument {
@@ -304,6 +306,8 @@ export interface PublicServiceState {
     language: Language;
     voiceMode: VoiceMode;
     available: boolean;
+    /** Separately reported so captions remain available without an audio relay. */
+    audioAvailable?: boolean;
     disclosure: string;
   }>;
 }

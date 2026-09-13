@@ -29,6 +29,7 @@ const allLanguages: Language[] = ['en', 'ru', 'es', 'uk'];
 
 interface TargetDraft {
   enabled: boolean;
+  speechEnabled: boolean;
   outputMode: OutputMode;
   profileId: string;
 }
@@ -64,6 +65,7 @@ function initialTargets(source: 'en' | 'ru'): Record<Language, TargetDraft> {
         // Keep v1 testing focused on the Russian/English pair. Spanish and
         // Ukrainian remain available, but begin opt-in until their latency is tuned.
         enabled: language === 'en' || language === 'ru',
+        speechEnabled: true,
         outputMode: language === source ? 'source' : 'generic-expressive',
         profileId: '',
       },
@@ -95,6 +97,7 @@ function channelConfigs(
           : {}),
         fallbackOrder: language === source ? ['mute'] : ['natural', 'mute'],
         muted: false,
+        speechEnabled: draft.speechEnabled,
       } satisfies ChannelConfig;
     });
 }
@@ -539,7 +542,7 @@ export function App() {
                 <h2>{live ? 'Translation is live' : 'Ready when the room is ready'}</h2>
                 <p>
                   {live
-                    ? 'Language configuration is locked. Mute, restart, or fall back per channel below.'
+                    ? 'Languages are locked. Switch audio on or off, mute, or restart each channel below.'
                     : 'Confirm the mixer feed, languages, processing node, and estimated spend before starting.'}
                 </p>
               </div>
@@ -717,6 +720,7 @@ export function App() {
                   const draft = liveConfig
                     ? {
                         enabled: true,
+                        speechEnabled: liveConfig.speechEnabled !== false,
                         outputMode: (liveConfig.voiceMode === 'source'
                           ? 'source'
                           : liveConfig.voiceMode === 'cloned'
@@ -770,6 +774,32 @@ export function App() {
                         </label>
                         <span className={`health-dot ${itemHealth?.state ?? 'idle'}`} />
                       </div>
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          checked={draft.speechEnabled}
+                          disabled={!draft.enabled}
+                          onChange={(event) => {
+                            const speechEnabled = event.target.checked;
+                            if (liveConfig) {
+                              void api
+                                .channel(connection, channelId, { speechEnabled })
+                                .catch((cause) =>
+                                  setError(cause instanceof Error ? cause.message : String(cause)),
+                                );
+                            } else {
+                              setTargets((current) => ({
+                                ...current,
+                                [language]: { ...current[language], speechEnabled },
+                              }));
+                            }
+                          }}
+                        />
+                        {isSource ? 'Send original audio' : 'Generate translated speech'}
+                      </label>
+                      {!draft.speechEnabled && (
+                        <span className="field-note">Live text continues. Audio is off.</span>
+                      )}
                       <label>
                         Output voice
                         <select
@@ -780,7 +810,7 @@ export function App() {
                                 ? `cloned:${draft.profileId}`
                                 : draft.outputMode
                           }
-                          disabled={live || isSource || !draft.enabled}
+                          disabled={live || isSource || !draft.enabled || !draft.speechEnabled}
                           onChange={(event) => {
                             if (event.target.value === 'add-cloned') {
                               setAddingVoice(true);

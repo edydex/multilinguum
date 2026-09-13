@@ -19,6 +19,7 @@ export const channelConfigSchema = z
     voiceProfileId: z.string().min(1).optional(),
     fallbackOrder: z.array(z.enum(['natural', 'cloned', 'mute'])).min(1),
     muted: z.boolean(),
+    speechEnabled: z.boolean().default(true),
   })
   .superRefine((channel, context) => {
     if (channel.voiceMode === 'cloned' && !channel.voiceProfileId) {

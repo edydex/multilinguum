@@ -47,7 +47,11 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   if (config.NODE_ENV === 'production' && config.PROCESSOR_CONTROL_TOKEN.includes('change-me')) {
     throw new Error('PROCESSOR_CONTROL_TOKEN must be replaced in production.');
   }
-  if (config.NODE_ENV === 'production' && config.VOICE_WORKER_TOKEN.includes('change-me')) {
+  if (
+    config.NODE_ENV === 'production' &&
+    config.VOICE_WORKER_URL &&
+    config.VOICE_WORKER_TOKEN.includes('change-me')
+  ) {
     throw new Error('VOICE_WORKER_TOKEN must be replaced in production.');
   }
   return config;

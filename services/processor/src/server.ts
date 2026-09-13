@@ -34,6 +34,7 @@ const replaySchema = z.object({
 
 const channelActionSchema = z.object({
   muted: z.boolean().optional(),
+  speechEnabled: z.boolean().optional(),
   forceNatural: z.boolean().optional(),
   restart: z.boolean().optional(),
 });
@@ -75,10 +76,16 @@ function publicState(config: ProcessorConfig, engine: SessionEngine): PublicServ
             language: channel.targetLanguage,
             voiceMode: channel.voiceMode,
             available: !channel.muted,
+            audioAvailable:
+              !channel.muted &&
+              channel.speechEnabled !== false &&
+              Boolean(config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET),
             disclosure:
-              channel.voiceMode === 'source'
-                ? 'Original delayed audio'
-                : 'AI-generated translated voice',
+              channel.speechEnabled === false
+                ? 'Live text; audio is off'
+                : channel.voiceMode === 'source'
+                  ? 'Original delayed audio'
+                  : 'AI-generated translated voice',
           })),
         }
       : { languages: [] }),
@@ -257,7 +264,8 @@ export async function buildServer(config: ProcessorConfig) {
     }
     const { language } = listenerTokenQuerySchema.parse(request.query);
     const requestedChannel = session.targets.find(
-      (channel) => channel.targetLanguage === language && !channel.muted,
+      (channel) =>
+        channel.targetLanguage === language && !channel.muted && channel.speechEnabled !== false,
     );
     if (!requestedChannel) return reply.code(404).send({ error: 'Language is not available.' });
     const token = new AccessToken(config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET, {
@@ -310,6 +318,7 @@ export async function buildServer(config: ProcessorConfig) {
     | {
         socket: WebSocket;
         close: () => Promise<void>;
+        useCascadeForChannel: (channelId: string) => Promise<void>;
       }
     | undefined;
   app.get('/api/capture/audio', { websocket: true }, (socket, request) => {
@@ -364,7 +373,14 @@ export async function buildServer(config: ProcessorConfig) {
         });
       return closePromise;
     };
-    activeCapture = { socket, close: closePipeline };
+    activeCapture = {
+      socket,
+      close: closePipeline,
+      useCascadeForChannel: async (channelId) => {
+        await ready;
+        if (!startupError) pipeline.useCascadeForChannel(channelId);
+      },
+    };
     socket.on('message', (message, isBinary) => {
       try {
         if (!acceptingFrames) return;
@@ -437,6 +453,10 @@ export async function buildServer(config: ProcessorConfig) {
       const { channelId } = request.params as { channelId: string };
       const action = channelActionSchema.parse(request.body);
       if (action.muted !== undefined) await engine.setMuted(channelId, action.muted);
+      if (action.speechEnabled !== undefined)
+        await engine.setSpeechEnabled(channelId, action.speechEnabled);
+      if (action.muted === true || action.speechEnabled === false)
+        await activeCapture?.useCascadeForChannel(channelId);
       if (action.forceNatural) await engine.forceNatural(channelId);
       if (action.restart) await engine.restartChannel(channelId);
       return engine.health().find((health) => health.channelId === channelId);

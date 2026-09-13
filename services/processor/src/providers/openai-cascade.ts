@@ -422,19 +422,22 @@ export class OpenAINaturalSpeechRenderer implements SpeechRenderer {
     const backlogMs = context?.playbackBacklogMs ?? 0;
     const speed = naturalSpeechSpeed(backlogMs);
     const semanticDelivery = deliveryInstructions(context?.sourceDelivery, segment.narrationPlan);
-    const response = await this.#client.audio.speech.create({
-      model: this.#model,
-      voice: 'cedar',
-      input: segment.text,
-      response_format: 'pcm',
-      speed,
-      instructions:
-        'Warm, clear church interpretation at a calm, natural speaking pace. Speak the complete ' +
-        'thought fluidly, honor its punctuation and emphasis without dramatizing, and allow a ' +
-        'brief natural breath at an internal comma or dash. Do not rush to match the source ' +
-        'speaker. Begin promptly and avoid a long silent tail; adjacent clauses will be joined ' +
-        `into one continuous program. Target-language semantic director: ${semanticDelivery}`,
-    });
+    const response = await this.#client.audio.speech.create(
+      {
+        model: this.#model,
+        voice: 'cedar',
+        input: segment.text,
+        response_format: 'pcm',
+        speed,
+        instructions:
+          'Warm, clear church interpretation at a calm, natural speaking pace. Speak the complete ' +
+          'thought fluidly, honor its punctuation and emphasis without dramatizing, and allow a ' +
+          'brief natural breath at an internal comma or dash. Do not rush to match the source ' +
+          'speaker. Begin promptly and avoid a long silent tail; adjacent clauses will be joined ' +
+          `into one continuous program. Target-language semantic director: ${semanticDelivery}`,
+      },
+      { ...(context?.signal ? { signal: context.signal } : {}) },
+    );
     const pcm24k = new Int16Array(await response.arrayBuffer());
     const pcm48k = new Int16Array(pcm24k.length * 2);
     for (let index = 0; index < pcm24k.length; index += 1) {

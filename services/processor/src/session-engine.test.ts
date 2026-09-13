@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import type {
   ArchiveManifest,
   ChannelConfig,
@@ -6,6 +6,7 @@ import type {
   RenderedSpeech,
   ServiceSession,
   SpeechRenderer,
+  SpeechRenderContext,
   TranscriptSegment,
   TranslationProvider,
 } from '@multilinguum/protocol';
@@ -31,10 +32,18 @@ class DeferredSpeech implements SpeechRenderer {
   readonly pending: Array<{
     segment: TranscriptSegment;
     resolve: (audio: RenderedSpeech) => void;
+    reject: (error: Error) => void;
+    signal: AbortSignal | undefined;
   }> = [];
 
-  render(segment: TranscriptSegment): Promise<RenderedSpeech> {
-    return new Promise((resolve) => this.pending.push({ segment, resolve }));
+  render(
+    segment: TranscriptSegment,
+    _profile?: never,
+    context?: SpeechRenderContext,
+  ): Promise<RenderedSpeech> {
+    return new Promise((resolve, reject) =>
+      this.pending.push({ segment, resolve, reject, signal: context?.signal }),
+    );
   }
 
   resolve(sequence: number): void {
@@ -57,109 +66,126 @@ class DeferredSpeech implements SpeechRenderer {
   }
 }
 
-describe('SessionEngine look-ahead speech queue', () => {
-  it('renders ahead, publishes in sequence, and reveals captions only with queued audio', async () => {
-    const captions: TranscriptSegment[] = [];
-    const audio: RenderedSpeech[] = [];
-    const transcripts: TranscriptSegment[] = [];
-    const renderer = new DeferredSpeech();
-    let activeManifest: ArchiveManifest | undefined;
-    const relay: MediaRelay = {
-      name: 'test-relay',
-      onListenerCount: () => () => undefined,
-      createSession: async () => undefined,
-      publishChannel: async (config: ChannelConfig) => ({
-        channelId: config.id,
-        roomName: 'test-room',
-        trackName: `translation-${config.targetLanguage}`,
-      }),
-      audioBacklogMs: () => 0,
-      publishAudio: async (_channelId, chunk) => {
-        audio.push(chunk);
+async function fixture(source: 'en' | 'ru' = 'ru', speechEnabled = true) {
+  const captions: TranscriptSegment[] = [];
+  const audio: RenderedSpeech[] = [];
+  const transcripts: TranscriptSegment[] = [];
+  const renderer = new DeferredSpeech();
+  let activeManifest: ArchiveManifest | undefined;
+  const relay: MediaRelay = {
+    name: 'test-relay',
+    onListenerCount: () => () => undefined,
+    createSession: async () => undefined,
+    publishChannel: async (config: ChannelConfig) => ({
+      channelId: config.id,
+      roomName: 'test-room',
+      trackName: `translation-${config.targetLanguage}`,
+    }),
+    audioBacklogMs: () => 0,
+    clearAudio: vi.fn(),
+    publishAudio: async (_channelId, chunk) => {
+      audio.push(chunk);
+    },
+    publishCaption: async (segment) => {
+      captions.push(segment);
+    },
+    closeSession: async () => undefined,
+  };
+  const translation: TranslationProvider = {
+    name: 'test-translation',
+    translate: async (segment, context) => ({
+      ...segment,
+      id: `${segment.id}-${context.targetLanguage}`,
+      language: context.targetLanguage,
+      text: `Translated ${segment.sequence}`,
+    }),
+  };
+  const engine = new SessionEngine({
+    archive: {
+      create: async (session) => {
+        activeManifest = manifest(session);
+        return activeManifest;
       },
-      publishCaption: async (segment) => {
-        captions.push(segment);
+      appendTranscript: async (segment) => {
+        transcripts.push(segment);
       },
-      closeSession: async () => undefined,
-    };
-    const translation: TranslationProvider = {
-      name: 'test-translation',
-      translate: async (segment, context) => ({
-        ...segment,
-        id: `${segment.id}-${context.targetLanguage}`,
-        language: context.targetLanguage,
-        text: `Translated ${segment.sequence}`,
-      }),
-    };
-    const engine = new SessionEngine({
-      archive: {
-        create: async (session) => {
-          activeManifest = manifest(session);
-          return activeManifest;
-        },
-        appendTranscript: async (segment) => {
-          transcripts.push(segment);
-        },
-        appendAudio: async () => undefined,
-        appendLatency: async () => undefined,
-        finalize: async () => activeManifest!,
-        list: async () => [],
-        retain: async () => activeManifest!,
-        delete: async () => undefined,
-        purgeExpired: async () => [],
-      },
-      relay,
-      profiles: {} as never,
-      context: {
-        require: async () => undefined,
-        retrieve: async () => [],
-      } as never,
-      deterministicTranslation: translation,
-      cloudTranslation: translation,
-      deterministicSpeech: renderer,
-      naturalSpeech: renderer,
-      broadcast: () => undefined,
-    });
-    const targets: ChannelConfig[] = [
-      {
-        id: 'channel-ru',
-        targetLanguage: 'ru',
-        translationProvider: 'openai-cascade',
-        voiceMode: 'source',
-        fallbackOrder: ['mute'],
-        muted: false,
-      },
-      {
-        id: 'channel-en',
-        targetLanguage: 'en',
-        translationProvider: 'openai-cascade',
-        voiceMode: 'natural',
-        fallbackOrder: ['mute'],
-        muted: false,
-      },
-    ];
-    await engine.create({
-      sourceLanguage: 'ru',
-      targets,
-      processingNode: {
-        id: 'node',
-        name: 'Node',
-        mode: 'remote',
-        endpoint: 'https://processor.example.test',
-        identityFingerprint: '0123456789abcdef',
-      },
-      archivePolicy: {
-        retentionDays: 30,
-        retainIndefinitely: false,
-        recordSource: true,
-        recordTranslations: true,
-      },
-      contextDocumentIds: [],
-      expectedDurationMinutes: 1,
-      budgetWarningUsd: 20,
-    });
-    await engine.start();
+      appendAudio: async () => undefined,
+      appendLatency: async () => undefined,
+      finalize: async () => activeManifest!,
+      list: async () => [],
+      retain: async () => activeManifest!,
+      delete: async () => undefined,
+      purgeExpired: async () => [],
+    },
+    relay,
+    profiles: {} as never,
+    context: {
+      require: async () => undefined,
+      retrieve: async () => [],
+    } as never,
+    deterministicTranslation: translation,
+    cloudTranslation: translation,
+    deterministicSpeech: renderer,
+    naturalSpeech: renderer,
+    broadcast: () => undefined,
+  });
+  const targets: ChannelConfig[] = [
+    {
+      id: `channel-${source}`,
+      targetLanguage: source,
+      translationProvider: 'openai-cascade',
+      voiceMode: 'source',
+      fallbackOrder: ['mute'],
+      muted: false,
+      speechEnabled,
+    },
+    {
+      id: `channel-${source === 'ru' ? 'en' : 'ru'}`,
+      targetLanguage: source === 'ru' ? 'en' : 'ru',
+      translationProvider: 'openai-cascade',
+      voiceMode: 'natural',
+      fallbackOrder: ['mute'],
+      muted: false,
+      speechEnabled,
+    },
+  ];
+  await engine.create({
+    sourceLanguage: source,
+    targets,
+    processingNode: {
+      id: 'node',
+      name: 'Node',
+      mode: 'remote',
+      endpoint: 'https://processor.example.test',
+      identityFingerprint: '0123456789abcdef',
+    },
+    archivePolicy: {
+      retentionDays: 30,
+      retainIndefinitely: false,
+      recordSource: true,
+      recordTranslations: true,
+    },
+    contextDocumentIds: [],
+    expectedDurationMinutes: 1,
+    budgetWarningUsd: 20,
+  });
+  await engine.start();
+  return { engine, renderer, captions, audio, transcripts, relay };
+}
 
+function ingest(engine: SessionEngine, sequence: number) {
+  return engine.ingestTranscript({
+    text: 'Grace and peace to you.',
+    sourceStartMs: sequence * 2000,
+    sourceEndMs: (sequence + 1) * 2000,
+    final: true,
+    sequence,
+  });
+}
+
+describe('SessionEngine independent text and audio', () => {
+  it('publishes captions immediately and adds ordered speech timing after rendering', async () => {
+    const { engine, renderer, captions, audio, transcripts } = await fixture();
     await engine.ingestProvisionalLiveTranscript(
       {
         id: 'preview-0',
@@ -200,6 +226,12 @@ describe('SessionEngine look-ahead speech queue', () => {
         .map((segment) => segment.sequence),
     ).toEqual([]);
 
+    expect(
+      captions
+        .filter((segment) => segment.channelId === 'channel-en' && segment.final)
+        .map((segment) => segment.sequence),
+    ).toEqual([0, 1]);
+    expect(audio).toHaveLength(0);
     renderer.resolve(1);
     renderer.resolve(0);
     await engine.stop();
@@ -207,12 +239,12 @@ describe('SessionEngine look-ahead speech queue', () => {
     expect(audio.map((chunk) => chunk.sequence)).toEqual([0, 1]);
     expect(
       captions
-        .filter((segment) => segment.channelId === 'channel-en' && segment.final)
+        .filter((segment) => segment.channelId === 'channel-en' && segment.phase === 'queued')
         .map((segment) => segment.sequence),
     ).toEqual([0, 1]);
     expect(
       captions
-        .filter((segment) => segment.channelId === 'channel-en' && segment.final)
+        .filter((segment) => segment.channelId === 'channel-en' && segment.phase === 'queued')
         .every((segment) => segment.playout?.words.length),
     ).toBe(true);
     expect(
@@ -220,5 +252,79 @@ describe('SessionEngine look-ahead speech queue', () => {
         .filter((segment) => segment.channelId === 'channel-en')
         .every((segment) => segment.final),
     ).toBe(true);
+  });
+
+  it.each(['en', 'ru'] as const)(
+    'translates %s with zero speech requests when audio is off',
+    async (source) => {
+      const { engine, renderer, captions, audio, transcripts } = await fixture(source, false);
+      await ingest(engine, 0);
+      await engine.ingestSourceAudio({
+        data: new Uint8Array(960),
+        startMs: 0,
+        endMs: 10,
+        sequence: 0,
+        language: source,
+      });
+      await engine.stop();
+      expect(renderer.pending).toHaveLength(0);
+      expect(audio).toHaveLength(0);
+      expect(captions.map((segment) => segment.language).sort()).toEqual(['en', 'ru']);
+      expect(transcripts).toHaveLength(2);
+    },
+  );
+
+  it('cancels pending speech, clears relay audio, and never replays it after enabling again', async () => {
+    const { engine, renderer, captions, audio, relay } = await fixture();
+    await ingest(engine, 0);
+    await engine.setSpeechEnabled('channel-en', false);
+    expect(renderer.pending[0]!.signal?.aborted).toBe(true);
+    expect(relay.clearAudio).toHaveBeenCalledWith('channel-en');
+    expect(
+      engine.current()?.targets.find((channel) => channel.id === 'channel-en')?.speechEnabled,
+    ).toBe(false);
+    await ingest(engine, 1);
+    expect(renderer.pending).toHaveLength(1);
+    expect(captions.filter((segment) => segment.channelId === 'channel-en')).toHaveLength(2);
+    await engine.setSpeechEnabled('channel-en', true);
+    await ingest(engine, 2);
+    // A provider ignoring AbortSignal must not stall the new queue or publish stale speech.
+    renderer.resolve(2);
+    await engine.drainAudio();
+    expect(audio.map((chunk) => chunk.sequence)).toEqual([2]);
+    renderer.resolve(0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(audio.map((chunk) => chunk.sequence)).toEqual([2]);
+    expect(
+      engine.current()?.targets.find((channel) => channel.id === 'channel-en')?.speechEnabled,
+    ).toBe(true);
+    await engine.stop();
+  });
+
+  it('keeps translated text available after speech generation fails', async () => {
+    const { engine, renderer, captions, audio } = await fixture();
+    await ingest(engine, 0);
+    renderer.pending[0]!.reject(new Error('Speech provider unavailable'));
+    await engine.drainAudio();
+    expect(captions.find((segment) => segment.channelId === 'channel-en')?.text).toBe(
+      'Translated 0',
+    );
+    expect(audio).toHaveLength(0);
+    expect(engine.health().find((channel) => channel.channelId === 'channel-en')?.state).toBe(
+      'degraded',
+    );
+    await engine.stop();
+  });
+
+  it('updates public session configuration and cancels pending speech on mute', async () => {
+    const { engine, renderer, audio } = await fixture();
+    await ingest(engine, 0);
+    await engine.setMuted('channel-en', true);
+    expect(engine.current()?.targets.find((channel) => channel.id === 'channel-en')?.muted).toBe(
+      true,
+    );
+    renderer.resolve(0);
+    await engine.stop();
+    expect(audio).toHaveLength(0);
   });
 });

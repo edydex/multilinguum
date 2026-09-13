@@ -145,6 +145,7 @@ export class RealtimeCapturePipeline {
     const directConfigs = this.#session.targets.filter(
       (channel) =>
         !channel.muted &&
+        channel.speechEnabled !== false &&
         channel.voiceMode === 'natural' &&
         channel.translationProvider === 'openai-realtime',
     );
@@ -216,6 +217,16 @@ export class RealtimeCapturePipeline {
           error instanceof Error ? error : new Error(String(error)),
         );
       });
+  }
+
+  useCascadeForChannel(channelId: string): void {
+    this.#activeDirectChannelIds.delete(channelId);
+    this.#transcriptBuffers.delete(channelId);
+    this.#channels.get(channelId)?.cancel();
+    this.#channels.delete(channelId);
+    // Cascade and direct transcripts share the listener timeline; never reuse a direct sequence.
+    this.#cascadeSequence = Math.max(this.#cascadeSequence, ...this.#transcriptSequences.values());
+    if (this.#cascadeBuffer) this.#cascadeBuffer.segment.sequence = this.#cascadeSequence;
   }
 
   async close(): Promise<void> {
@@ -602,6 +613,7 @@ export class RealtimeCapturePipeline {
     this.#transcriptSequences.set(channelId, buffer.sequence + 1);
     this.#translatedTranscriptChain = this.#translatedTranscriptChain
       .then(async () => {
+        if (!this.#activeDirectChannelIds.has(channelId)) return;
         await this.#engine.ingestRealtimeTranscript(channelId, {
           text,
           sourceStartMs: buffer.startMs,
@@ -621,7 +633,11 @@ export class RealtimeCapturePipeline {
   #receiveTranslatedAudio(channelId: string, audio: RenderedSpeech): void {
     if (!this.#activeDirectChannelIds.has(channelId)) return;
     const chain = (this.#audioChains.get(channelId) ?? Promise.resolve())
-      .then(() => this.#engine.ingestRealtimeAudio(channelId, audio))
+      .then(() =>
+        this.#activeDirectChannelIds.has(channelId)
+          ? this.#engine.ingestRealtimeAudio(channelId, audio)
+          : undefined,
+      )
       .catch((error) =>
         this.#failDirectChannel(
           channelId,
@@ -633,6 +649,7 @@ export class RealtimeCapturePipeline {
 
   #failDirectChannel(channelId: string, error: Error): void {
     if (!this.#activeDirectChannelIds.delete(channelId)) return;
+    this.useCascadeForChannel(channelId);
     this.#engine.reportChannelFailure(channelId, error, 'openai-cascade+natural-fallback');
   }
 
