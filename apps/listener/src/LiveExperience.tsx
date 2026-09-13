@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import type { Language } from '@multilinguum/protocol';
 import { AudioFocus, type AudioChoice } from './audio-focus';
 import { CaptionPanel } from './CaptionPanel';
+import { useBufferedAudio } from './useBufferedAudio';
+import { VideoTimeline, type VideoSample } from './video-timeline';
 import { useLiveAudio } from './useLiveAudio';
 import { usePublicService } from './usePublicService';
 import { YouTubePlayer, type VideoControls } from './YouTubePlayer';
@@ -24,6 +26,7 @@ export interface LiveExperienceOptions {
   churchName?: string;
   videoId?: string | null;
   channelUrl?: string | null;
+  broadcastDelaySeconds?: number;
 }
 
 export function LiveExperience({
@@ -31,8 +34,12 @@ export function LiveExperience({
   churchName,
   videoId,
   channelUrl,
+  broadcastDelaySeconds = 0,
 }: LiveExperienceOptions) {
-  const { service, captions, connection, clockOffsetMs } = usePublicService(apiBase, churchName);
+  const { service, captions, audioWindow, connection, clockOffsetMs } = usePublicService(
+    apiBase,
+    churchName,
+  );
   const [language, setLanguage] = useState<Language | undefined>(() => {
     try {
       const saved = localStorage.getItem('heritage-live-text-language');
@@ -44,6 +51,16 @@ export function LiveExperience({
   });
   const [audioChoice, setAudioChoice] = useState<AudioChoice>(videoId ? 'original' : 'muted');
   const [volume, setVolume] = useState(1);
+  const [delaySeconds, setDelaySeconds] = useState(() =>
+    Math.min(180, Math.max(0, broadcastDelaySeconds)),
+  );
+  const [sourceNow, setSourceNow] = useState<number>();
+  const [videoPlaying, setVideoPlaying] = useState(false);
+  const [textFollowsVideo, setTextFollowsVideo] = useState(true);
+  const [needsAlignment, setNeedsAlignment] = useState(false);
+  const timeline = useRef(new VideoTimeline());
+  const timing = useRef({ clockOffsetMs, delaySeconds });
+  timing.current = { clockOffsetMs, delaySeconds };
   const [notice, setNotice] = useState<string>();
   const [floating, setFloating] = useState<Window>();
   const [openingFloat, setOpeningFloat] = useState(false);
@@ -59,11 +76,44 @@ export function LiveExperience({
           (item) =>
             item.available &&
             item.audioAvailable !== false &&
-            (!videoId || item.voiceMode !== 'source'),
+            (!videoId ||
+              (item.voiceMode !== 'source' &&
+                item.bufferedAudioAvailable &&
+                videoPlaying &&
+                !needsAlignment)),
         )
         .map((item) => item.language)
     : [];
-  const audio = useLiveAudio(apiBase, availableAudio, volume);
+  const bufferedLanguages = availableAudio.filter((language) =>
+    service.languages.some((item) => item.language === language && item.bufferedAudioAvailable),
+  );
+  const legacy = useLiveAudio(
+    apiBase,
+    availableAudio.filter((language) => !bufferedLanguages.includes(language)),
+    volume,
+  );
+  const buffered = useBufferedAudio(
+    apiBase,
+    bufferedLanguages,
+    audioWindow,
+    volume,
+    sourceNow,
+    clockOffsetMs,
+    Boolean(videoId),
+  );
+  const usesBuffer =
+    audioChoice !== 'original' &&
+    audioChoice !== 'muted' &&
+    bufferedLanguages.includes(audioChoice);
+  const audio = {
+    ...(usesBuffer ? buffered : legacy),
+    stop: () => {
+      buffered.stop();
+      legacy.stop();
+    },
+    start: (selected: Language) =>
+      bufferedLanguages.includes(selected) ? buffered.start(selected) : legacy.start(selected),
+  };
   const current = useRef({ audio, videoId, audioChoice });
   current.current = { audio, videoId, audioChoice };
   const focus = useMemo(
@@ -84,6 +134,13 @@ export function LiveExperience({
   const chooseAudio = useCallback(
     async (choice: AudioChoice) => {
       setNotice(undefined);
+      if (choice !== 'original' && choice !== 'muted' && bufferedLanguages.includes(choice)) {
+        try {
+          void buffered.prepare().catch(() => undefined);
+        } catch {
+          /* start reports unsupported playback. */
+        }
+      }
       focusBusy.current += 1;
       try {
         await focus.choose(choice);
@@ -91,7 +148,7 @@ export function LiveExperience({
         focusBusy.current -= 1;
       }
     },
-    [focus],
+    [focus, buffered.prepare, bufferedLanguages.join(',')],
   );
 
   useEffect(() => {
@@ -130,7 +187,25 @@ export function LiveExperience({
       floatRef.current?.close();
     };
   }, [focus]);
+  const receiveVideoSample = useCallback((sample: VideoSample) => {
+    setVideoPlaying(sample.playing);
+    const at = timeline.current.sample(
+      sample,
+      Date.now() + timing.current.clockOffsetMs,
+      timing.current.delaySeconds * 1000,
+    );
+    if (at !== undefined) setSourceNow(at);
+  }, []);
+  useLayoutEffect(() => {
+    timeline.current.reset();
+    setSourceNow(undefined);
+    setNeedsAlignment(false);
+    setDelaySeconds(Math.min(180, Math.max(0, broadcastDelaySeconds)));
+  }, [videoId, service.sessionId, broadcastDelaySeconds]);
   const interruptVideo = useCallback(() => {
+    timeline.current.interrupt();
+    setNeedsAlignment(timeline.current.needsAlignment);
+    setVideoPlaying(false);
     const selected = current.current.audioChoice;
     focus.cancel();
     if ((selected !== 'original' && selected !== 'muted') || focusBusy.current > 0) {
@@ -261,11 +336,13 @@ export function LiveExperience({
                   disabled={!availableAudio.includes(item.language)}
                 >
                   {names[item.language]}
-                  {item.audioAvailable === false
-                    ? ' · audio off'
-                    : item.voiceMode === 'source'
-                      ? ' · original'
-                      : ' · translated'}
+                  {videoId && item.audioAvailable !== false && !item.bufferedAudioAvailable
+                    ? ' · in-person audio only'
+                    : item.audioAvailable === false
+                      ? ' · audio off'
+                      : item.voiceMode === 'source'
+                        ? ' · original'
+                        : ' · translated'}
                 </option>
               ))}
           </select>
@@ -319,16 +396,82 @@ export function LiveExperience({
           {audio.error}
         </p>
       )}
+      {videoId && (
+        <details className="timing-controls" open={needsAlignment || undefined}>
+          <summary>Match translation to video · {delaySeconds} s delay</summary>
+          <p>
+            Start at YouTube’s LIVE position. If translation appears or plays too early, increase
+            the delay. If it is late, decrease it.
+          </p>
+          <label>
+            Match text to video
+            <input
+              type="checkbox"
+              checked={textFollowsVideo}
+              onChange={(event) => setTextFollowsVideo(event.target.checked)}
+            />
+          </label>
+          {!textFollowsVideo && <p>Text appears as it arrives, independently of the video.</p>}
+          <label>
+            Translation delay (seconds)
+            <input
+              type="number"
+              min="0"
+              max="180"
+              step="1"
+              value={delaySeconds}
+              onChange={(event) => {
+                const value = Number(event.target.value);
+                if (!Number.isFinite(value)) return;
+                void chooseAudio('muted');
+                setDelaySeconds(Math.min(180, Math.max(0, value)));
+                setNotice('Timing changed. Choose translated audio again when ready.');
+              }}
+            />
+          </label>
+          {needsAlignment && (
+            <p>
+              Video playback changed. Return to LIVE at normal speed, then match translation again.
+            </p>
+          )}
+          <button
+            disabled={!videoPlaying}
+            onClick={() => {
+              void chooseAudio('muted');
+              if (timeline.current.align(Date.now() + clockOffsetMs)) {
+                setNeedsAlignment(false);
+                setNotice('Translation timing reset. Choose audio when ready.');
+              }
+            }}
+          >
+            Match to current live position
+          </button>
+          <p>
+            The church’s {broadcastDelaySeconds} s setting is a starting point. Your video
+            connection may need a different delay.
+          </p>
+        </details>
+      )}
+      {usesBuffer && buffered.notice && (
+        <p role="status" className="notice">
+          {buffered.notice}
+        </p>
+      )}
       <CaptionPanel
         caption={language ? captions[language] : undefined}
         language={language}
-        narrated={audio.playing && audioChoice === language}
+        narrated={!usesBuffer && audio.playing && audioChoice === language}
         clockOffsetMs={clockOffsetMs}
+        video={Boolean(videoId) && textFollowsVideo}
+        sourceNow={sourceNow}
+        sessionStartedAt={service.startedAt}
       />
       <p className="disclosure">
         AI translation may contain errors.{' '}
         {videoId
-          ? 'Live translation and YouTube can have different delays.'
+          ? textFollowsVideo
+            ? 'Translation follows the measured video delay. Adjust timing if your stream differs.'
+            : 'Text appears as it arrives. Translated audio uses the measured video delay.'
           : 'Text appears as it arrives; spoken translation may follow later.'}
       </p>
     </div>
@@ -346,6 +489,7 @@ export function LiveExperience({
           originalWanted={audioChoice === 'original'}
           onInterrupted={interruptVideo}
           onNativeUnmute={nativeUnmute}
+          onSample={receiveVideoSample}
         />
       )}
       {!videoId && channelUrl && (

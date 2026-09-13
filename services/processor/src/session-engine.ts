@@ -1,3 +1,4 @@
+import { sourceClock } from './source-clock.js';
 import { randomUUID } from 'node:crypto';
 import type {
   ArchiveManifest,
@@ -501,6 +502,12 @@ export class SessionEngine {
       sequence: input.sequence,
       language: input.language,
       renderer: 'delayed-original',
+      ...sourceClock(
+        input.startMs,
+        input.endMs,
+        input.timing?.captureCompletedAtUnixMs,
+        session.startedAt,
+      ),
     };
     await this.#dependencies.archive.appendAudio(session.id, sourceChannel.config.id, audio);
     if (generation !== sourceChannel.audioGeneration || !this.#audioEnabled(sourceChannel)) return;
@@ -680,7 +687,16 @@ export class SessionEngine {
         });
       }
 
-      const finalCaption: TranscriptSegment = { ...translated, final: true };
+      const finalCaption: TranscriptSegment = {
+        ...translated,
+        ...sourceClock(
+          source.sourceStartMs,
+          source.sourceEndMs,
+          sourceTiming?.captureCompletedAtUnixMs,
+          session.startedAt,
+        ),
+        final: true,
+      };
       runtime.lastFinalCaptionSequence = Math.max(
         runtime.lastFinalCaptionSequence,
         finalCaption.sequence,
@@ -818,7 +834,15 @@ export class SessionEngine {
     }).then(
       (rendered) => ({
         ok: true as const,
-        rendered: prepareSpeechForContinuousPlayout(rendered, trailingPauseMs, leadingPauseMs),
+        rendered: {
+          ...prepareSpeechForContinuousPlayout(rendered, trailingPauseMs, leadingPauseMs),
+          ...sourceClock(
+            input.source.sourceStartMs,
+            input.source.sourceEndMs,
+            input.sourceTiming?.captureCompletedAtUnixMs,
+            session.startedAt,
+          ),
+        },
         speechRender: {
           startedAtUnixMs: renderStartedAtUnixMs,
           completedAtUnixMs: Date.now(),
@@ -970,6 +994,15 @@ export class SessionEngine {
     sourceAudioSequence: number | undefined,
     translationLookahead?: string,
   ): Promise<TranscriptSegment[]> {
+    source = {
+      ...source,
+      ...sourceClock(
+        source.sourceStartMs,
+        source.sourceEndMs,
+        timing?.captureCompletedAtUnixMs,
+        this.#requiredSession().startedAt,
+      ),
+    };
     const sourceAudioSpan =
       sourceAudioSequence === undefined
         ? undefined

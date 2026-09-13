@@ -328,3 +328,25 @@ describe('SessionEngine independent text and audio', () => {
     expect(audio).toHaveLength(0);
   });
 });
+
+it('carries capture time into captions and rendered speech when the microphone starts late', async () => {
+  const { engine, renderer, captions, audio } = await fixture();
+  const captureEnd = Date.parse(engine.current()!.startedAt!) + 32_000;
+  await engine.ingestTranscript({
+    text: 'Grace and peace to you.',
+    sourceStartMs: 0,
+    sourceEndMs: 2000,
+    sequence: 0,
+    final: true,
+    timing: { captureCompletedAtUnixMs: captureEnd },
+  });
+  const translated = captions.find((item) => item.language === 'en')!;
+  expect(translated.sourceStartAtUnixMs).toBe(captureEnd - 2000);
+  expect(translated.sourceEndAtUnixMs).toBe(captureEnd);
+  renderer.resolve(0);
+  await engine.drainAudio();
+  expect(audio[0]).toMatchObject({
+    sourceStartAtUnixMs: captureEnd - 2000,
+    sourceEndAtUnixMs: captureEnd,
+  });
+});

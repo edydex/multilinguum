@@ -73,3 +73,16 @@ export function narratedAnchorSequence(
   }
   return anchor;
 }
+
+/** Never reveal a future clause, including provisional text, in broadcast mode. */
+export function sourceCaptionIsVisible(
+  segment: TranscriptSegment,
+  sourceNow: number | undefined,
+  sessionStartedAt: string | undefined,
+): boolean {
+  const at =
+    segment.sourceStartAtUnixMs ?? Date.parse(sessionStartedAt ?? '') + segment.sourceStartMs;
+  return (
+    sourceNow !== undefined && Number.isFinite(sourceNow) && Number.isFinite(at) && at <= sourceNow
+  );
+}

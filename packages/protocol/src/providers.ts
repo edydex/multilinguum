@@ -15,6 +15,8 @@ export interface AudioChunk {
   sampleRate: number;
   startMs: number;
   endMs: number;
+  sourceStartAtUnixMs?: number;
+  sourceEndAtUnixMs?: number;
   sequence: number;
 }
 

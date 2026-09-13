@@ -1,6 +1,12 @@
 import { useEffect, useState } from 'react';
-import type { ProcessorEvent, PublicServiceState } from '@multilinguum/protocol';
+import type { ProcessorEvent, PublicAudioEvent, PublicServiceState } from '@multilinguum/protocol';
 import { mergeCaption, type CaptionTimeline } from './caption-timeline';
+import {
+  appendAudioClip,
+  clearAudioWindow,
+  emptyAudioWindow,
+  updateAudioWindow,
+} from './audio-window';
 import { publicEndpoint } from './public-endpoint';
 
 export function usePublicService(apiBase: string, churchName = 'Church community') {
@@ -10,6 +16,7 @@ export function usePublicService(apiBase: string, churchName = 'Church community
     languages: [],
     serverTimeUnixMs: Date.now(),
   });
+  const [audioWindow, setAudioWindow] = useState(emptyAudioWindow);
   const [captions, setCaptions] = useState<Record<string, CaptionTimeline>>({});
   const [connection, setConnection] = useState<'connecting' | 'live' | 'disconnected'>(
     'connecting',
@@ -32,6 +39,7 @@ export function usePublicService(apiBase: string, churchName = 'Church community
         sessionId = next.sessionId;
       }
       setService(next);
+      setAudioWindow((current) => updateAudioWindow(current, next));
       setClockOffsetMs(next.serverTimeUnixMs - sampledAt);
     };
     const load = async () => {
@@ -60,13 +68,19 @@ export function usePublicService(apiBase: string, churchName = 'Church community
         if (stopped || socket !== next) return;
         try {
           const event = JSON.parse(String(message.data)) as
-            ProcessorEvent | { type: 'public-state'; state: PublicServiceState };
+            ProcessorEvent | PublicAudioEvent | { type: 'public-state'; state: PublicServiceState };
           lastMessageAt = Date.now();
           if (event.type === 'public-state') {
             receivedSocketState = true;
             applyState(event.state, Date.now());
             setConnection('live');
             retryDelay = 1000;
+          } else if (event.type === 'audio-clip') {
+            setAudioWindow((current) => appendAudioClip(current, event.clip));
+          } else if (event.type === 'audio-clear') {
+            setAudioWindow((current) =>
+              clearAudioWindow(current, event.sessionId, event.channelId, event.generation),
+            );
           } else if (event.type === 'transcript' && event.segment.sessionId === sessionId) {
             setCaptions((current) => ({
               ...current,
@@ -93,6 +107,7 @@ export function usePublicService(apiBase: string, churchName = 'Church community
       };
     };
     setCaptions({});
+    setAudioWindow(emptyAudioWindow());
     void load();
     connect();
     const watchdog = window.setInterval(() => {
@@ -109,5 +124,5 @@ export function usePublicService(apiBase: string, churchName = 'Church community
       socket?.close();
     };
   }, [apiBase]);
-  return { service, captions, connection, clockOffsetMs };
+  return { service, captions, audioWindow, connection, clockOffsetMs };
 }

@@ -5,11 +5,12 @@ import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { AccessToken } from 'livekit-server-sdk';
 import { z, ZodError } from 'zod';
-import type { ProcessorEvent, PublicServiceState } from '@multilinguum/protocol';
+import type { ProcessorEvent, PublicAudioEvent, PublicServiceState } from '@multilinguum/protocol';
 import { languageSchema, transcriptInputSchema } from '@multilinguum/protocol';
 import type { WebSocket } from 'ws';
 import { FileArchiveStore } from './archive-store.js';
 import type { ProcessorConfig } from './config.js';
+import { BufferedAudioRelay } from './buffered-audio-relay.js';
 import { BroadcastMediaRelay } from './providers/broadcast-relay.js';
 import {
   DeterministicSpeechRenderer,
@@ -64,7 +65,11 @@ function webSocketControlToken(request: FastifyRequest): string {
   );
 }
 
-function publicState(config: ProcessorConfig, engine: SessionEngine): PublicServiceState {
+function publicState(
+  config: ProcessorConfig,
+  engine: SessionEngine,
+  relay: BufferedAudioRelay,
+): PublicServiceState {
   const session = engine.current();
   const active = session?.state === 'live';
   return {
@@ -77,12 +82,19 @@ function publicState(config: ProcessorConfig, engine: SessionEngine): PublicServ
           ...(session.startedAt ? { startedAt: session.startedAt } : {}),
           languages: session.targets.map((channel) => ({
             language: channel.targetLanguage,
+            channelId: channel.id,
+            audioGeneration: relay.generation(channel.id),
+            bufferedAudioAvailable:
+              !channel.muted &&
+              channel.speechEnabled !== false &&
+              channel.translationProvider !== 'openai-realtime',
             voiceMode: channel.voiceMode,
             available: !channel.muted,
             audioAvailable:
               !channel.muted &&
               channel.speechEnabled !== false &&
-              Boolean(config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET),
+              (channel.translationProvider !== 'openai-realtime' ||
+                Boolean(config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET)),
             disclosure:
               channel.speechEnabled === false
                 ? 'Live text; audio is off'
@@ -159,7 +171,7 @@ export async function buildServer(config: ProcessorConfig) {
       const publicPayload =
         event.type === 'transcript'
           ? payload
-          : JSON.stringify({ type: 'public-state', state: publicState(config, engine) });
+          : JSON.stringify({ type: 'public-state', state: publicState(config, engine, relay) });
       for (const socket of publicSockets) {
         if (socket.readyState === socket.OPEN) socket.send(publicPayload);
       }
@@ -187,7 +199,7 @@ export async function buildServer(config: ProcessorConfig) {
     ? () =>
         new OpenAIRealtimeTranslationChannel(config.OPENAI_API_KEY!, config.OPENAI_TRANSLATE_MODEL)
     : undefined;
-  const relay =
+  const immediateRelay =
     config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET
       ? new LiveKitMediaRelay(
           config.LIVEKIT_URL.toString(),
@@ -196,6 +208,18 @@ export async function buildServer(config: ProcessorConfig) {
           broadcast,
         )
       : new BroadcastMediaRelay(broadcast);
+  const broadcastAudio = (event: PublicAudioEvent) => {
+    const payload = JSON.stringify(event);
+    for (const socket of publicSockets) {
+      if (socket.readyState === socket.OPEN) socket.send(payload);
+    }
+  };
+  const relay = new BufferedAudioRelay(
+    immediateRelay,
+    (clip) => broadcastAudio({ type: 'audio-clip', clip }),
+    (sessionId, channelId, generation) =>
+      broadcastAudio({ type: 'audio-clear', sessionId, channelId, generation }),
+  );
   const engine = new SessionEngine({
     archive,
     context,
@@ -295,8 +319,32 @@ export async function buildServer(config: ProcessorConfig) {
 
   app.get('/api/public/service', { config: { cors: { origin: '*' } } }, async (_request, reply) => {
     reply.header('cache-control', 'no-store');
-    return publicState(config, engine);
+    return publicState(config, engine, relay);
   });
+
+  app.get(
+    '/api/public/audio/:sessionId/:clipId.wav',
+    { config: { cors: { origin: '*' } } },
+    async (request, reply) => {
+      reply.header('cache-control', 'no-store').header('x-content-type-options', 'nosniff');
+      const parsed = z.object({ sessionId: z.uuid(), clipId: z.uuid() }).safeParse(request.params);
+      if (!parsed.success) return reply.code(404).send({ error: 'Live audio unavailable.' });
+      const session = engine.current();
+      if (session?.state !== 'live' || session.id !== parsed.data.sessionId)
+        return reply.code(410).send({ error: 'Live audio has ended.' });
+      const clip = relay.read(session.id, parsed.data.clipId);
+      const channel = session.targets.find((item) => item.id === clip?.metadata.channelId);
+      if (
+        !clip ||
+        !channel ||
+        channel.muted ||
+        channel.speechEnabled === false ||
+        clip.metadata.generation !== relay.generation(channel.id)
+      )
+        return reply.code(410).send({ error: 'Live audio unavailable.' });
+      return reply.type('audio/wav').send(clip.wave);
+    },
+  );
 
   app.get('/api/public/token', { config: { cors: { origin: '*' } } }, async (request, reply) => {
     reply.header('cache-control', 'no-store');
@@ -338,7 +386,17 @@ export async function buildServer(config: ProcessorConfig) {
     { websocket: true, config: { cors: { origin: '*' } } },
     (socket) => {
       publicSockets.add(socket);
-      socket.send(JSON.stringify({ type: 'public-state', state: publicState(config, engine) }));
+      socket.send(
+        JSON.stringify({ type: 'public-state', state: publicState(config, engine, relay) }),
+      );
+      const session = engine.current();
+      if (session?.state === 'live') {
+        for (const clip of relay.snapshot(session.id)) {
+          const channel = session.targets.find((item) => item.id === clip.channelId);
+          if (channel && !channel.muted && channel.speechEnabled !== false)
+            socket.send(JSON.stringify({ type: 'audio-clip', clip } satisfies PublicAudioEvent));
+        }
+      }
       for (const events of captionHistory.values()) {
         for (const event of events) socket.send(JSON.stringify(event));
       }
@@ -346,7 +404,10 @@ export async function buildServer(config: ProcessorConfig) {
     },
   );
   const publicHeartbeat = setInterval(() => {
-    const message = JSON.stringify({ type: 'public-state', state: publicState(config, engine) });
+    const message = JSON.stringify({
+      type: 'public-state',
+      state: publicState(config, engine, relay),
+    });
     for (const socket of publicSockets) {
       if (socket.readyState === socket.OPEN) socket.send(message);
     }

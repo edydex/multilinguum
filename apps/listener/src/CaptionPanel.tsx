@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import type { Language, TranscriptSegment } from '@multilinguum/protocol';
 import {
   captionWordState,
+  sourceCaptionIsVisible,
   narratedAnchorSequence,
   visibleCaptionSegments,
   type CaptionTimeline,
@@ -37,11 +38,17 @@ export function CaptionPanel({
   language,
   narrated,
   clockOffsetMs,
+  sourceNow,
+  sessionStartedAt,
+  video = false,
 }: {
   caption: CaptionTimeline | undefined;
   language: Language | undefined;
   narrated: boolean;
   clockOffsetMs: number;
+  sourceNow?: number | undefined;
+  sessionStartedAt?: string | undefined;
+  video?: boolean;
 }) {
   const [clock, setClock] = useState(Date.now());
   const [following, setFollowing] = useState(true);
@@ -57,11 +64,18 @@ export function CaptionPanel({
     const timer = window.setInterval(update, 80);
     return () => window.clearInterval(timer);
   }, [narrated, clockOffsetMs]);
+  const eligible = (segment: TranscriptSegment) =>
+    !video || sourceCaptionIsVisible(segment, sourceNow, sessionStartedAt);
   const final = useMemo(
-    () => (narrated ? visibleCaptionSegments(caption?.final ?? [], clock) : (caption?.final ?? [])),
-    [caption?.final, clock, narrated],
+    () =>
+      video
+        ? (caption?.final ?? []).filter(eligible)
+        : narrated
+          ? visibleCaptionSegments(caption?.final ?? [], clock)
+          : (caption?.final ?? []),
+    [caption?.final, clock, narrated, video, sourceNow, sessionStartedAt],
   );
-  const anchor = narrated ? narratedAnchorSequence(final, clock) : final.at(-1)?.sequence;
+  const anchor = narrated && !video ? narratedAnchorSequence(final, clock) : final.at(-1)?.sequence;
   const scroll = useCallback(() => {
     if (!viewport.current) return;
     const target = anchor === undefined ? undefined : segments.current.get(anchor);
@@ -129,15 +143,21 @@ export function CaptionPanel({
                   else segments.current.delete(segment.sequence);
                 }}
               >
-                {narrated ? <CaptionWords segment={segment} now={clock} /> : segment.text}
+                {narrated && !video ? <CaptionWords segment={segment} now={clock} /> : segment.text}
               </p>
             ))}
-            {!caption?.final.length && !caption?.live && (
-              <p className="caption-placeholder">Text will appear when the speaker begins.</p>
+            {!final.length && (!caption?.live || !eligible(caption.live)) && (
+              <p className="caption-placeholder">
+                {video
+                  ? 'Waiting for text at this video position.'
+                  : 'Text will appear when the speaker begins.'}
+              </p>
             )}
-            {caption?.live && (caption.final.at(-1)?.sequence ?? -1) < caption.live.sequence && (
-              <p className="caption-live">{caption.live.text}</p>
-            )}
+            {caption?.live &&
+              eligible(caption.live) &&
+              (caption.final.at(-1)?.sequence ?? -1) < caption.live.sequence && (
+                <p className="caption-live">{caption.live.text}</p>
+              )}
           </div>
           <span className="visually-hidden" role="status">
             {final.at(-1)?.text}

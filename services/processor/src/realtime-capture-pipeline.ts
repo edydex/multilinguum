@@ -336,6 +336,13 @@ export class RealtimeCapturePipeline {
   }
 
   #receiveProvisionalSourceTranscript(segment: TranscriptSegment): void {
+    const end = this.#captureTimestamp(segment.sourceEndMs);
+    if (end !== undefined)
+      segment = {
+        ...segment,
+        sourceEndAtUnixMs: end,
+        sourceStartAtUnixMs: end - Math.max(0, segment.sourceEndMs - segment.sourceStartMs),
+      };
     const sourceChannelIds = new Set([this.#sourceChannelId()]);
     this.#sourceTranscriptChain = this.#sourceTranscriptChain
       .then(() => this.#engine.ingestProvisionalLiveTranscript(segment, sourceChannelIds))

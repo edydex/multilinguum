@@ -216,6 +216,9 @@ export interface TranscriptSegment {
   sourceDelivery?: SourceDelivery | undefined;
   /** Semantic delivery decisions produced with the translation for narrator phrasing. */
   narrationPlan?: NarrationPlan | undefined;
+  /** Capture-clock source bounds; microphone capture may start after the session. */
+  sourceStartAtUnixMs?: number;
+  sourceEndAtUnixMs?: number;
   /** Server-clock schedule for the audio listeners actually hear. */
   playout?: CaptionPlayoutTiming;
   final: boolean;
@@ -327,6 +330,25 @@ export type ProcessorEvent =
   | { type: 'cost'; estimatedCostUsd: number; budgetWarning: boolean }
   | { type: 'error'; scope: string; message: string };
 
+/** Public metadata only. PCM and private session configuration never enter events. */
+export interface BufferedAudioClip {
+  id: string;
+  sessionId: string;
+  channelId: string;
+  language: Language;
+  generation: number;
+  sequence: number;
+  sourceStartAtUnixMs: number;
+  sourceEndAtUnixMs: number;
+  publishedAtUnixMs: number;
+  durationMs: number;
+  byteLength: number;
+}
+
+export type PublicAudioEvent =
+  | { type: 'audio-clip'; clip: BufferedAudioClip }
+  | { type: 'audio-clear'; sessionId: string; channelId: string; generation: number };
+
 export interface PublicServiceState {
   active: boolean;
   serverTimeUnixMs: number;
@@ -339,6 +361,10 @@ export interface PublicServiceState {
     available: boolean;
     /** Separately reported so captions remain available without an audio relay. */
     audioAvailable?: boolean;
+    /** Source-timestamped WAV window, independent of LiveKit credentials. */
+    bufferedAudioAvailable?: boolean;
+    channelId?: string;
+    audioGeneration?: number;
     disclosure: string;
   }>;
 }

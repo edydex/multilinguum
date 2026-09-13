@@ -6,6 +6,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { loadConfig } from './config.js';
+import { DeterministicSpeechRenderer } from './providers/deterministic.js';
+import type { PublicAudioEvent } from '@multilinguum/protocol';
 import { buildServer } from './server.js';
 
 const controlToken = 'test-control-token-with-at-least-32-characters';
@@ -14,6 +16,7 @@ const servers: FastifyInstance[] = [];
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 async function testServer(overrides: NodeJS.ProcessEnv = {}) {
@@ -853,11 +856,104 @@ describe('public Heritage client contract', () => {
       expect(events.some((event) => event.type === 'public-state' && event.state?.active)).toBe(
         true,
       );
-      expect(events.every((event) => event.type === 'public-state')).toBe(true);
+      expect(events.every((event) => ['public-state', 'audio-clear'].includes(event.type))).toBe(
+        true,
+      );
       expect(JSON.stringify(events)).not.toContain('identityFingerprint');
       expect(JSON.stringify(events)).not.toContain('processingNode');
     } finally {
       socket.terminate();
     }
   });
+});
+
+it('serves only current live PCM and revokes clip URLs when voice turns off or a session ends', async () => {
+  vi.spyOn(DeterministicSpeechRenderer.prototype, 'render').mockImplementation(async (segment) => ({
+    data: new Uint8Array(9600),
+    encoding: 'pcm_s16le',
+    sampleRate: 48000,
+    startMs: segment.sourceStartMs,
+    endMs: segment.sourceEndMs,
+    sequence: segment.sequence,
+    language: segment.language,
+    renderer: 'synthetic-pcm-test',
+  }));
+  const server = await testServer();
+  await server.ready();
+  const events: PublicAudioEvent[] = [];
+  const socket = await server.injectWS('/api/public/events');
+  socket.on('message', (data) => events.push(JSON.parse(data.toString())));
+  try {
+    const request = sessionRequest();
+    request.targets = request.targets.slice(0, 2);
+    const created = await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: request,
+    });
+    expect(created.statusCode).toBe(200);
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/start',
+      headers: headers(),
+      payload: {},
+    });
+    const replay = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/replay',
+      headers: headers(),
+      payload: {
+        segments: [
+          {
+            text: 'Благодать вам и мир от Бога Отца нашего.',
+            language: 'ru',
+            sourceStartMs: 0,
+            sourceEndMs: 1000,
+            sequence: 1,
+            final: true,
+          },
+        ],
+      },
+    });
+    expect(replay.statusCode).toBe(200);
+    await new Promise((resolve) => setImmediate(resolve));
+    const event = events.find((event) => event.type === 'audio-clip');
+    expect(event?.type).toBe('audio-clip');
+    if (event?.type !== 'audio-clip') throw new Error('No audio metadata');
+    const url = `/api/public/audio/${event.clip.sessionId}/${event.clip.id}.wav`;
+    const audio = await server.inject({ url, headers: { origin: 'https://heritage.faith' } });
+    expect(audio.statusCode).toBe(200);
+    expect(audio.headers['content-type']).toBe('audio/wav');
+    expect(audio.headers['cache-control']).toBe('no-store');
+    expect(audio.headers['access-control-allow-origin']).toBe('*');
+    expect(audio.rawPayload.subarray(0, 4).toString()).toBe('RIFF');
+    expect(audio.rawPayload.byteLength).toBe(event.clip.byteLength);
+    expect(
+      (await server.inject({ url: '/api/public/audio/not-a-session/private.env.wav' })).statusCode,
+    ).toBe(404);
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/channels/channel-en',
+      headers: headers(),
+      payload: { speechEnabled: false },
+    });
+    expect((await server.inject({ url })).statusCode).toBe(410);
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/channels/channel-en',
+      headers: headers(),
+      payload: { speechEnabled: true },
+    });
+    expect((await server.inject({ url })).statusCode).toBe(410);
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/stop',
+      headers: headers(),
+      payload: {},
+    });
+    expect((await server.inject({ url })).statusCode).toBe(410);
+  } finally {
+    socket.terminate();
+  }
 });

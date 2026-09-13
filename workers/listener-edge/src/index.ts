@@ -41,7 +41,10 @@ async function proxyPublicApi(request: Request, environment: Environment): Promi
 export default {
   async fetch(request: Request, environment: Environment): Promise<Response> {
     const url = new URL(request.url);
-    if (publicApiPaths.has(url.pathname)) {
+    if (
+      publicApiPaths.has(url.pathname) ||
+      /^\/api\/public\/audio\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.wav$/i.test(url.pathname)
+    ) {
       return proxyPublicApi(request, environment);
     }
     if (url.pathname.startsWith('/api/')) return new Response('Not found', { status: 404 });

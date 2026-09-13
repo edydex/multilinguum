@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import type { VideoSample } from './video-timeline';
 
 interface Player {
   mute(): void;
@@ -6,6 +7,7 @@ interface Player {
   isMuted(): boolean;
   getCurrentTime(): number;
   getPlayerState(): number;
+  getPlaybackRate(): number;
   destroy(): void;
 }
 type YouTubeWindow = Window & {
@@ -50,16 +52,18 @@ export function YouTubePlayer({
   originalWanted,
   onInterrupted,
   onNativeUnmute,
+  onSample,
 }: {
   videoId: string;
   controls: React.MutableRefObject<VideoControls | undefined>;
   originalWanted: boolean;
   onInterrupted(): void;
   onNativeUnmute(): void;
+  onSample(sample: VideoSample): void;
 }) {
   const host = useRef<HTMLDivElement>(null);
-  const latest = useRef({ originalWanted, onInterrupted, onNativeUnmute });
-  latest.current = { originalWanted, onInterrupted, onNativeUnmute };
+  const latest = useRef({ originalWanted, onInterrupted, onNativeUnmute, onSample });
+  latest.current = { originalWanted, onInterrupted, onNativeUnmute, onSample };
   const [error, setError] = useState<string>();
   useEffect(() => {
     let stopped = false;
@@ -76,7 +80,7 @@ export function YouTubePlayer({
         readyTimer = window.setTimeout(() => {
           if (!stopped)
             setError(
-              'YouTube has not loaded. You can open the service on YouTube while continuing to read here.',
+              'YouTube has not loaded. Open the service on YouTube. Turn off “Match text to video” to read live text here.',
             );
         }, 15000);
         player = new (window as YouTubeWindow).YT!.Player(slot, {
@@ -115,13 +119,18 @@ export function YouTubePlayer({
                   Math.abs(time - sample.time - (wall - sample.wall) / 1000) > 2
                 )
                   latest.current.onInterrupted();
+                latest.current.onSample({
+                  time,
+                  playing: player.getPlayerState() === 1 && player.getPlaybackRate() === 1,
+                });
                 sample = { time, wall };
               }, 200);
             },
             onStateChange: (event: { data: number }) => {
-              if (event.data === 2 || event.data === 0) latest.current.onInterrupted();
+              if (event.data !== 1) latest.current.onInterrupted();
               sample = undefined;
             },
+            onPlaybackRateChange: () => latest.current.onInterrupted(),
             onError: () => {
               window.clearTimeout(readyTimer);
               latest.current.onInterrupted();
