@@ -215,9 +215,19 @@ export async function buildServer(config: ProcessorConfig) {
   });
   relay.onListenerCount((language, count) => engine.updateListenerCount(language, count));
 
+  let maintenance = false;
+  let retentionJob = Promise.resolve();
+
   const requireControl = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!hasControlToken(request, config.PROCESSOR_CONTROL_TOKEN)) {
       return reply.code(401).send({ error: 'Unauthorized' });
+    }
+    if (
+      maintenance &&
+      request.method !== 'GET' &&
+      request.routeOptions.url !== '/api/maintenance'
+    ) {
+      return reply.code(503).send({ error: 'Translation maintenance is in progress' });
     }
   };
 
@@ -227,6 +237,8 @@ export async function buildServer(config: ProcessorConfig) {
     const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
     if (!readControlAccess(token, config.PROCESSOR_CONTROL_TOKEN))
       return reply.code(401).send({ error: 'Control access expired or unauthorized' });
+    if (maintenance && request.method !== 'GET')
+      return reply.code(503).send({ error: 'Translation maintenance is in progress' });
   };
   app.post('/api/control/leases', { preHandler: requireControl }, async (request, reply) => {
     const { subject } = z
@@ -246,7 +258,7 @@ export async function buildServer(config: ProcessorConfig) {
     return reply.code(status).send({ error: message });
   });
 
-  app.get('/health', async () => ({ status: 'ok', version: '0.1.0' }));
+  app.get('/health', async () => ({ status: 'ok', version: '0.1.0', maintenance }));
 
   app.get('/api/preflight', { preHandler: requireSessionControl }, async () => {
     const disk = await statfs(config.ARCHIVE_ROOT);
@@ -471,14 +483,31 @@ export async function buildServer(config: ProcessorConfig) {
 
   // Serialize state transitions from concurrent Heritage and SyncShow controllers.
   let transition = Promise.resolve();
-  const changeSession = <T>(action: () => Promise<T>): Promise<T> => {
-    const result = transition.then(action);
+  const changeSession = <T>(action: () => Promise<T>, allowMaintenance = false): Promise<T> => {
+    const result = transition.then(() => {
+      if (maintenance && !allowMaintenance)
+        throw new Error('Translation maintenance is in progress');
+      return action();
+    });
     transition = result.then(
       () => undefined,
       () => undefined,
     );
     return result;
   };
+  app.post('/api/maintenance', { preHandler: requireControl }, async (request) => {
+    const { enabled } = z.object({ enabled: z.boolean() }).strict().parse(request.body);
+    return changeSession(async () => {
+      const current = engine.current();
+      if (enabled && current && !['completed', 'failed'].includes(current.state)) {
+        throw new Error('Stop the current translation service before maintenance');
+      }
+      maintenance = enabled;
+      if (enabled) await retentionJob;
+      return { maintenance };
+    }, true);
+  });
+
   app.post('/api/sessions', { preHandler: requireSessionControl }, async (request) =>
     changeSession(() => engine.create(request.body)),
   );
@@ -661,10 +690,18 @@ export async function buildServer(config: ProcessorConfig) {
   });
 
   const retentionTimer = setInterval(() => {
-    void archive.purgeExpired().catch((error) => app.log.error(error));
+    if (!maintenance)
+      retentionJob = retentionJob
+        .then(() => archive.purgeExpired())
+        .then(() => undefined)
+        .catch((error) => app.log.error(error));
   }, 60 * 60_000);
   retentionTimer.unref();
-  app.addHook('onClose', async () => clearInterval(retentionTimer));
+  app.addHook('onClose', async () => {
+    clearInterval(retentionTimer);
+    await retentionJob;
+    archive.close();
+  });
 
   return app;
 }

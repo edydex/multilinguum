@@ -51,6 +51,10 @@ export class FileArchiveStore implements ArchiveStore {
     `);
   }
 
+  close(): void {
+    this.#database.close();
+  }
+
   async create(
     session: ServiceSession,
     engineVersions: Record<string, string>,

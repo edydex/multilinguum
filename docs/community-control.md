@@ -19,3 +19,16 @@ The managed console initially offers English/Russian cloud text, optional genera
 ## Current verification boundary
 
 The control authorization and socket-lease logic are covered by local tests. Production client builds are included in the processor Docker build. A real mixer, cloud provider calls, translated audio relay, Docker image execution, and a church-service rehearsal still require acceptance. No shared-data opt-in or provider account configuration is performed by this console.
+
+# Companion maintenance
+
+The Heritage deployment companion uses the master-only `POST /api/maintenance`
+with `{ "enabled": true }` before backup, update, or restore. Prepared and live
+sessions refuse maintenance; finish the service first. Once accepted, new session
+mutations are refused until maintenance is disabled or the processor restarts.
+The Community public proxy does not expose this endpoint.
+
+The host stops the idle processor before copying its SQLite archive and starts it
+again afterward. SIGTERM closes the HTTP server and archive database. Companion
+protocol version `1` is declared in `services/processor/heritage-companion.version`;
+the installer requires that contract as well as a clean, exact source revision.

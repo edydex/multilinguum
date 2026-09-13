@@ -89,6 +89,70 @@ function sessionRequest() {
 }
 
 describe('processor vertical slice', () => {
+  it('quiesces idle translation for backups and refuses maintenance during a service', async () => {
+    const server = await testServer();
+    const maintenance = (enabled: boolean) =>
+      server.inject({
+        method: 'POST',
+        url: '/api/maintenance',
+        headers: headers(),
+        payload: { enabled },
+      });
+    expect((await maintenance(true)).json()).toEqual({ maintenance: true });
+    expect(
+      (
+        await server.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          headers: headers(),
+          payload: sessionRequest(),
+        })
+      ).statusCode,
+    ).toBe(503);
+    const scoped = issueControlLease('operator', controlToken);
+    expect(
+      (
+        await server.inject({
+          method: 'POST',
+          url: '/api/maintenance',
+          headers: { authorization: `Bearer ${scoped.token}` },
+          payload: { enabled: false },
+        })
+      ).statusCode,
+    ).toBe(401);
+    expect((await maintenance(false)).statusCode).toBe(200);
+    expect(
+      (
+        await server.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          headers: headers(),
+          payload: sessionRequest(),
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect((await maintenance(true)).statusCode).toBe(409);
+    expect(
+      (
+        await server.inject({
+          method: 'POST',
+          url: '/api/sessions/current/start',
+          headers: headers(),
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect((await maintenance(true)).statusCode).toBe(409);
+    expect((await server.inject('/health')).json().maintenance).toBe(false);
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/stop',
+      headers: headers(),
+      payload: {},
+    });
+    expect((await maintenance(true)).statusCode).toBe(200);
+  });
+
   it('authenticates and renews a scoped operator WebSocket without disconnecting it', async () => {
     const server = await testServer();
     await server.ready();
