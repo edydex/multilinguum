@@ -87,7 +87,9 @@ export function useBufferedAudio(
             changed: setPlaying,
             late: () =>
               setNotice(
-                'A translated phrase arrived too late. Increase the translation delay to allow more time.',
+                video
+                  ? 'A translated phrase arrived too late for this video position and was skipped. Live text remains available.'
+                  : 'An old audio phrase was skipped to stay near the live speaker.',
               ),
             failed: (message) => {
               stop();
