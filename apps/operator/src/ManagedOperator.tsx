@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  ContextDocument,
   TranscriptSegment,
   TranslationProfileId,
   TranslationProfileInfo,
@@ -40,6 +41,11 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
   const [source, setSource] = useState<'en' | 'ru'>('en');
   const [speech, setSpeech] = useState(false);
   const [profileId, setProfileId] = useState<TranslationProfileId>('quality');
+  const [useNotes, setUseNotes] = useState(false);
+  const [documents, setDocuments] = useState<ContextDocument[]>([]);
+  const [noteIds, setNoteIds] = useState<string[]>([]);
+  const [shareNotes, setShareNotes] = useState(false);
+  const [notesError, setNotesError] = useState('');
   const [captureRequested, setCaptureRequested] = useState(false);
   const [deviceId, setDeviceId] = useState<string>();
   const [captions, setCaptions] = useState<TranscriptSegment[]>([]);
@@ -114,6 +120,20 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
     };
     void refresh();
     void api
+      .contextDocuments(latestConnection.current)
+      .then((value) => {
+        if (!stopped) {
+          setDocuments(value);
+          setNotesError('');
+        }
+      })
+      .catch(() => {
+        if (!stopped)
+          setNotesError(
+            'Could not load sermon notes. Upload notes or reopen these controls to retry.',
+          );
+      });
+    void api
       .preflight(latestConnection.current)
       .then((value) => {
         if (!stopped) setPreflight(value);
@@ -141,6 +161,7 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
   }, [lease.apiBase]);
   useEffect(() => subscription.current?.renew(lease.token), [lease.token]);
   useEffect(() => setCaptions([]), [session?.id]);
+  useEffect(() => setShareNotes(false), [session?.id, profileId, noteIds]);
   useEffect(() => {
     if (capture.error || audio.error) {
       setError(capture.error || audio.error || 'Audio input disconnected.');
@@ -188,7 +209,8 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
           recordSource: true,
           recordTranslations: true,
         },
-        contextDocumentIds: [],
+        contextDocumentIds: useNotes ? noteIds : [],
+        shareSermonNotesWithEconomy: useNotes && profileId === 'economy' && shareNotes,
         expectedDurationMinutes: 120,
         budgetWarningUsd: 20,
       });
@@ -201,6 +223,9 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
     : preflight?.translationProfiles?.find((profile) => profile.id === profileId);
   const profileReady =
     locked && !session?.translationProfile ? preflight?.openai?.configured : selectedProfile?.ready;
+  const notesReady =
+    locked || !useNotes || (noteIds.length > 0 && (profileId !== 'economy' || shareNotes));
+  const shownNoteIds = locked && session ? session.contextDocumentIds : useNotes ? noteIds : [];
   const translated =
     session?.targets.filter((channel) => channel.targetLanguage !== session.sourceLanguage) ?? [];
   const speechEnabled = locked
@@ -292,8 +317,9 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
                 {selectedProfile.id === 'economy' && (
                   <p className="hint">
                     Spoken text and translation context go to the configured sharing project.
-                    Private note attachments are excluded. OpenAI may cover eligible text usage;
-                    remaining allowance is unverified. Recognition and voice are additional charges.
+                    Selected sermon notes are included only with your explicit choice below. OpenAI
+                    may cover eligible text usage; remaining allowance is unverified. Recognition
+                    and voice are additional charges.
                     {selectedProfile.overagePolicy === 'allow-billed' &&
                       ' Billed overage is allowed by server setup.'}
                   </p>
@@ -309,6 +335,113 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
               Update the translation processor to enable Quality and Economy.
             </p>
           )}
+          <details className="sermon-notes">
+            <summary>
+              Sermon notes · {shownNoteIds.length ? `${shownNoteIds.length} selected` : 'Optional'}
+            </summary>
+            <p className="hint">
+              Relevant excerpts help with names, Scripture wording and terminology. The translator
+              must follow the words actually spoken, not read ahead from the notes.
+            </p>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={locked ? shownNoteIds.length > 0 : useNotes}
+                disabled={locked || busy}
+                onChange={(event) => {
+                  setUseNotes(event.target.checked);
+                  setShareNotes(false);
+                }}
+              />
+              Use sermon notes for translation
+            </label>
+            {(useNotes || shownNoteIds.length > 0) && (
+              <>
+                {notesError && (
+                  <p role="alert" className="notice">
+                    {notesError}
+                  </p>
+                )}
+                <label>
+                  Upload PDF or text notes
+                  <input
+                    type="file"
+                    accept=".pdf,.txt,application/pdf,text/plain"
+                    disabled={locked || busy || expired}
+                    onChange={(event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = '';
+                      if (file)
+                        void act(async () => {
+                          const document = await api.uploadContextDocument(connection, file);
+                          setDocuments((previous) => [
+                            ...previous.filter((item) => item.id !== document.id),
+                            document,
+                          ]);
+                          setNoteIds((previous) =>
+                            previous.length < 8
+                              ? [...new Set([...previous, document.id])]
+                              : previous,
+                          );
+                          setNotesError('');
+                        });
+                    }}
+                  />
+                </label>
+                <p className="hint">
+                  Up to 8 documents, 10 MB each. Uploading keeps them on this church server; only
+                  selected excerpts are sent when translation runs.
+                </p>
+                {documents.map((document) => (
+                  <label className="toggle" key={document.id}>
+                    <input
+                      type="checkbox"
+                      checked={shownNoteIds.includes(document.id)}
+                      disabled={
+                        locked || busy || (!noteIds.includes(document.id) && noteIds.length >= 8)
+                      }
+                      onChange={(event) =>
+                        setNoteIds((previous) =>
+                          event.target.checked
+                            ? [...previous, document.id]
+                            : previous.filter((id) => id !== document.id),
+                        )
+                      }
+                    />
+                    {document.filename}
+                  </label>
+                ))}
+                {!locked && !noteIds.length && (
+                  <p className="hint">
+                    Select or upload notes, or turn notes off to start without them.
+                  </p>
+                )}
+                {selectedProfile?.id === 'economy' && (
+                  <label className="toggle">
+                    <input
+                      type="checkbox"
+                      checked={locked ? session?.shareSermonNotesWithEconomy === true : shareNotes}
+                      disabled={locked || busy || !noteIds.length}
+                      onChange={(event) => setShareNotes(event.target.checked)}
+                    />
+                    Share selected notes with Economy for this service
+                  </label>
+                )}
+                {selectedProfile?.id === 'economy' && (
+                  <p className="hint">
+                    Selected excerpts will go to the OpenAI sharing project and may be used to
+                    improve its models. Extra context uses input tokens. This choice does not
+                    publish the notes to your congregation.
+                  </p>
+                )}
+                {locked && (
+                  <p className="hint">
+                    Notes are fixed for this service. End or cancel it to change the selection.
+                  </p>
+                )}
+              </>
+            )}
+          </details>
           <label className="toggle">
             <input
               type="checkbox"
@@ -332,7 +465,11 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
               <button
                 className="primary"
                 disabled={
-                  busy || expired || !profileReady || (locked && session?.state !== 'preflight')
+                  busy ||
+                  expired ||
+                  !profileReady ||
+                  !notesReady ||
+                  (locked && session?.state !== 'preflight')
                 }
                 onClick={() => void act(start)}
               >

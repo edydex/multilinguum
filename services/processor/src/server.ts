@@ -617,29 +617,35 @@ export async function buildServer(config: ProcessorConfig) {
     return reply.code(204).send();
   });
 
-  app.get('/api/context-documents', { preHandler: requireControl }, async () => context.list());
-  app.post('/api/context-documents', { preHandler: requireControl }, async (request, reply) => {
-    const encodedFilename = request.headers['x-sermon-notes-filename'];
-    if (typeof encodedFilename !== 'string') {
-      return reply.code(400).send({ error: 'The sermon-note filename is required.' });
-    }
-    let filename: string;
-    try {
-      filename = decodeURIComponent(encodedFilename);
-    } catch {
-      return reply.code(400).send({ error: 'The sermon-note filename is invalid.' });
-    }
-    const contentType = request.headers['content-type']?.split(';', 1)[0];
-    if (contentType !== 'application/pdf' && contentType !== 'text/plain') {
-      return reply.code(415).send({ error: 'Upload sermon notes as PDF or plain text.' });
-    }
-    const body =
-      typeof request.body === 'string' ? Buffer.from(request.body, 'utf8') : request.body;
-    if (!Buffer.isBuffer(body)) {
-      return reply.code(400).send({ error: 'A non-empty sermon-note file is required.' });
-    }
-    return reply.code(201).send(await context.create(filename, contentType, body));
-  });
+  app.get('/api/context-documents', { preHandler: requireSessionControl }, async () =>
+    context.list(),
+  );
+  app.post(
+    '/api/context-documents',
+    { preHandler: requireSessionControl },
+    async (request, reply) => {
+      const encodedFilename = request.headers['x-sermon-notes-filename'];
+      if (typeof encodedFilename !== 'string') {
+        return reply.code(400).send({ error: 'The sermon-note filename is required.' });
+      }
+      let filename: string;
+      try {
+        filename = decodeURIComponent(encodedFilename);
+      } catch {
+        return reply.code(400).send({ error: 'The sermon-note filename is invalid.' });
+      }
+      const contentType = request.headers['content-type']?.split(';', 1)[0];
+      if (contentType !== 'application/pdf' && contentType !== 'text/plain') {
+        return reply.code(415).send({ error: 'Upload sermon notes as PDF or plain text.' });
+      }
+      const body =
+        typeof request.body === 'string' ? Buffer.from(request.body, 'utf8') : request.body;
+      if (!Buffer.isBuffer(body)) {
+        return reply.code(400).send({ error: 'A non-empty sermon-note file is required.' });
+      }
+      return reply.code(201).send(await context.create(filename, contentType, body));
+    },
+  );
 
   app.get('/api/voice-profiles', { preHandler: requireControl }, async () => profiles.list());
   app.post('/api/voice-profiles', { preHandler: requireControl }, async (request, reply) =>

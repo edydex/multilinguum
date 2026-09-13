@@ -117,9 +117,13 @@ export class SessionEngine {
       throw new Error(
         'Translation profiles require text translation with optional separate speech.',
       );
-    if (profile?.info.id === 'economy' && parsed.contextDocumentIds.length)
+    if (
+      profile?.info.id === 'economy' &&
+      parsed.contextDocumentIds.length &&
+      !parsed.shareSermonNotesWithEconomy
+    )
       throw new Error(
-        'Economy cannot send private sermon-note attachments to the sharing project.',
+        'Enable Share selected notes with Economy to send these sermon notes to the sharing project.',
       );
     await this.#dependencies.context.require(parsed.contextDocumentIds);
     const targets: ChannelConfig[] = parsed.targets.map((target) => ({
@@ -166,6 +170,10 @@ export class SessionEngine {
       createdAt,
       relayRoom: `service-${id}`,
       contextDocumentIds: parsed.contextDocumentIds,
+      shareSermonNotesWithEconomy:
+        profile?.info.id === 'economy' &&
+        parsed.shareSermonNotesWithEconomy &&
+        parsed.contextDocumentIds.length > 0,
       archivePolicy: parsed.archivePolicy,
       configurationLocked: false,
       budgetWarningUsd: parsed.budgetWarningUsd,

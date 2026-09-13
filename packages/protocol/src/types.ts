@@ -77,6 +77,8 @@ export interface ServiceSession {
   stoppedAt?: string;
   relayRoom?: string;
   contextDocumentIds: string[];
+  /** Explicit permission for this session's selected notes to enter the Economy sharing project. */
+  shareSermonNotesWithEconomy?: boolean;
   archivePolicy: ArchivePolicy;
   configurationLocked: boolean;
   budgetWarningUsd: number;
@@ -287,6 +289,7 @@ export interface TranscriptManifest {
 
 export interface ArchiveManifest {
   translationProfile?: TranslationProfileInfo;
+  sermonNotes?: { documentIds: string[]; sharedWithEconomy: boolean };
   version: 1;
   sessionId: string;
   createdAt: string;

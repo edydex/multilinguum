@@ -7,7 +7,7 @@ Heritage exposes the console at `/admin/live-translation`. A church manager or s
 ## Processor contract
 
 - `POST /api/control/leases` accepts `{ subject }` with the permanent processor bearer key. This route is server-to-server only and is not included in Heritage's proxy.
-- A signed lease lasts ten minutes and grants preflight, create/current/start/stop, channel controls, operator events, and mixer capture. It cannot mint leases, replay transcripts, or read/change archives, context documents, or voice profiles.
+- A signed lease lasts ten minutes and grants preflight, create/current/start/stop, channel controls, operator events, mixer capture, and listing/uploading the church's translation reference notes. It cannot mint leases, replay transcripts, or read/change archives or voice profiles. Note uploads stay on this server; selecting them for an Economy service additionally requires that service's explicit sharing choice.
 - HTTP calls use `Authorization: Bearer <lease>`. WebSockets use the `multilinguum-auth.<lease>` subprotocol, never a URL query token.
 - Both WebSockets accept `{ type: "renew-auth", token }`. Renewal must have the same operator subject and scope, and arrive before expiry. Invalid renewal closes the socket and immediately rejects further input. Membership revocation therefore takes effect at the next renewal, with a maximum ten-minute lease window.
 - The capture socket sends `{ type: "capture-ready", sessionId }` after the provider pipeline starts. Clients must wait for this before sending binary PCM. Only one capture console is admitted; another console may still change translation settings or stop the service.

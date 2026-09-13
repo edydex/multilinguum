@@ -75,6 +75,10 @@ export class FileArchiveStore implements ArchiveStore {
       sourceLanguage: session.sourceLanguage,
       engineVersions,
       ...(session.translationProfile ? { translationProfile: session.translationProfile } : {}),
+      sermonNotes: {
+        documentIds: session.contextDocumentIds,
+        sharedWithEconomy: session.shareSermonNotesWithEconomy === true,
+      },
       audioTracks: session.targets.map((channel) => ({
         channelId: channel.id,
         language: channel.targetLanguage,

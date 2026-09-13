@@ -110,7 +110,7 @@ describe('processor vertical slice', () => {
     ).toBeUndefined();
   });
 
-  it('rejects Economy note attachments and attempts to bypass its text-only provider route', async () => {
+  it('requires an explicit Economy note choice and rejects attempts to bypass its text-only provider route', async () => {
     const server = await testServer({
       OPENAI_API_KEY: 'test-audio-key',
       OPENAI_ECONOMY_TEXT_API_KEY: 'test-sharing-key',
@@ -135,7 +135,7 @@ describe('processor vertical slice', () => {
       payload: { ...body, contextDocumentIds: ['10000000-0000-4000-8000-000000000001'] },
     });
     expect(notes.statusCode).toBe(409);
-    expect(notes.json().error).toContain('private sermon-note');
+    expect(notes.json().error).toContain('Share selected notes with Economy');
     const bypass = await server.inject({
       method: 'POST',
       url: '/api/sessions',
@@ -150,137 +150,191 @@ describe('processor vertical slice', () => {
     });
     expect(bypass.statusCode).toBe(409);
     expect(bypass.json().error).toContain('optional separate speech');
-  });
-
-  it('runs a text-only Economy service, archives its model choice, and makes no speech requests', async () => {
-    const requests: Array<{
-      url: string;
-      authorization: string | null;
-      body: Record<string, unknown>;
-    }> = [];
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async (url: string, init: RequestInit) => {
-        requests.push({
-          url: String(url),
-          authorization: new Headers(init.headers).get('authorization'),
-          body: JSON.parse(init.body as string),
-        });
-        return Response.json({
-          id: 'resp_fixture',
-          object: 'response',
-          status: 'completed',
-          output: [
-            {
-              type: 'message',
-              id: 'msg_fixture',
-              role: 'assistant',
-              status: 'completed',
-              content: [
-                {
-                  type: 'output_text',
-                  annotations: [],
-                  text: JSON.stringify({
-                    translation: 'Grace and peace.',
-                    narrationPlan: {
-                      role: 'neutral',
-                      cadence: 'flowing',
-                      arc: 'standalone',
-                      pauseBefore: 'none',
-                      pauseAfter: 'full',
-                      emphasis: [],
-                      beats: [],
-                    },
-                  }),
-                },
-              ],
-            },
-          ],
-        });
-      }),
-    );
-    const server = await testServer({
-      OPENAI_API_KEY: 'test-audio-key',
-      OPENAI_ECONOMY_TEXT_API_KEY: 'test-sharing-key',
-      OPENAI_ECONOMY_SHARING_CONFIRMED: 'true',
-      OPENAI_ECONOMY_OVERAGE_POLICY: 'allow-billed',
+    const uploaded = await server.inject({
+      method: 'POST',
+      url: '/api/context-documents',
+      headers: {
+        ...headers(),
+        'content-type': 'text/plain',
+        'x-sermon-notes-filename': 'Lesson.txt',
+      },
+      payload: 'Ephesians 4:3: preserve the unity of the Spirit.',
     });
-    const response = await server.inject({
+    expect(uploaded.statusCode).toBe(201);
+    const accepted = await server.inject({
       method: 'POST',
       url: '/api/sessions',
       headers: headers(),
       payload: {
-        ...sessionRequest(),
-        translationProfile: 'economy',
-        targets: sessionRequest()
-          .targets.slice(0, 2)
-          .map((target) => ({
-            ...target,
-            translationProvider: target.voiceMode === 'source' ? 'deterministic' : 'openai-cascade',
-            speechEnabled: false,
-          })),
+        ...body,
+        contextDocumentIds: [uploaded.json().id],
+        shareSermonNotesWithEconomy: true,
       },
     });
-    expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({
-      translationProfile: { id: 'economy' },
-      costEstimateKind: 'transcription-only',
-      estimatedCostUsd: 2.04,
+    expect(accepted.statusCode).toBe(200);
+    expect(accepted.json()).toMatchObject({
+      contextDocumentIds: [uploaded.json().id],
+      shareSermonNotesWithEconomy: true,
     });
-    expect(requests).toHaveLength(0);
-    expect(
-      (
-        await server.inject({
-          method: 'POST',
-          url: '/api/sessions/current/start',
-          headers: headers(),
-          payload: {},
-        })
-      ).statusCode,
-    ).toBe(200);
-    expect(requests).toHaveLength(0);
-    const replay = await server.inject({
-      method: 'POST',
-      url: '/api/sessions/current/replay',
-      headers: headers(),
-      payload: {
-        segments: [
-          {
-            text: 'Благодать и мир.',
-            sourceStartMs: 0,
-            sourceEndMs: 2000,
-            final: true,
-            sequence: 0,
-          },
-        ],
-      },
-    });
-    expect(replay.statusCode).toBe(200);
-    expect(requests).toHaveLength(1);
-    expect(requests[0]).toMatchObject({
-      url: 'https://api.openai.com/v1/responses',
-      authorization: 'Bearer test-sharing-key',
-      body: { model: 'gpt-5.6-terra' },
-    });
-    const publicResponse = await server.inject({ url: '/api/public/service' });
-    expect(publicResponse.body).not.toContain('translationProfile');
-    expect(publicResponse.body).not.toContain('test-sharing-key');
-    expect(
-      publicResponse
-        .json()
-        .languages.every((language: { audioAvailable: boolean }) => !language.audioAvailable),
-    ).toBe(true);
-    const stopped = await server.inject({
-      method: 'POST',
-      url: '/api/sessions/current/stop',
-      headers: headers(),
-      payload: {},
-    });
-    expect(stopped.json().archive).toMatchObject({
-      translationProfile: { id: 'economy', textModel: 'gpt-5.6-terra' },
-      engineVersions: { translation: 'delayed-original,openai-responses:gpt-5.6-terra' },
-    });
+    const publicState = await server.inject({ url: '/api/public/service' });
+    expect(publicState.body).not.toContain(uploaded.json().id);
+    expect(publicState.body).not.toContain('Lesson.txt');
   });
+
+  it.each([false, true])(
+    'runs Economy with explicitly selected notes=%s and no speech requests',
+    async (shareNotes) => {
+      const requests: Array<{
+        url: string;
+        authorization: string | null;
+        body: Record<string, unknown>;
+      }> = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string, init: RequestInit) => {
+          requests.push({
+            url: String(url),
+            authorization: new Headers(init.headers).get('authorization'),
+            body: JSON.parse(init.body as string),
+          });
+          return Response.json({
+            id: 'resp_fixture',
+            object: 'response',
+            status: 'completed',
+            output: [
+              {
+                type: 'message',
+                id: 'msg_fixture',
+                role: 'assistant',
+                status: 'completed',
+                content: [
+                  {
+                    type: 'output_text',
+                    annotations: [],
+                    text: JSON.stringify({
+                      translation: 'Grace and peace.',
+                      narrationPlan: {
+                        role: 'neutral',
+                        cadence: 'flowing',
+                        arc: 'standalone',
+                        pauseBefore: 'none',
+                        pauseAfter: 'full',
+                        emphasis: [],
+                        beats: [],
+                      },
+                    }),
+                  },
+                ],
+              },
+            ],
+          });
+        }),
+      );
+      const server = await testServer({
+        OPENAI_API_KEY: 'test-audio-key',
+        OPENAI_ECONOMY_TEXT_API_KEY: 'test-sharing-key',
+        OPENAI_ECONOMY_SHARING_CONFIRMED: 'true',
+        OPENAI_ECONOMY_OVERAGE_POLICY: 'allow-billed',
+      });
+      const note = await server.inject({
+        method: 'POST',
+        url: '/api/context-documents',
+        headers: {
+          ...headers(),
+          'content-type': 'text/plain',
+          'x-sermon-notes-filename': 'Context.txt',
+        },
+        payload: 'Благодать и мир: grace and peace. Reference name: Ephesus.',
+      });
+      expect(note.statusCode).toBe(201);
+      const response = await server.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: headers(),
+        payload: {
+          ...sessionRequest(),
+          translationProfile: 'economy',
+          contextDocumentIds: shareNotes ? [note.json().id] : [],
+          shareSermonNotesWithEconomy: shareNotes,
+          targets: sessionRequest()
+            .targets.slice(0, 2)
+            .map((target) => ({
+              ...target,
+              translationProvider:
+                target.voiceMode === 'source' ? 'deterministic' : 'openai-cascade',
+              speechEnabled: false,
+            })),
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        translationProfile: { id: 'economy' },
+        costEstimateKind: 'transcription-only',
+        estimatedCostUsd: 2.04,
+      });
+      expect(requests).toHaveLength(0);
+      expect(
+        (
+          await server.inject({
+            method: 'POST',
+            url: '/api/sessions/current/start',
+            headers: headers(),
+            payload: {},
+          })
+        ).statusCode,
+      ).toBe(200);
+      expect(requests).toHaveLength(0);
+      const replay = await server.inject({
+        method: 'POST',
+        url: '/api/sessions/current/replay',
+        headers: headers(),
+        payload: {
+          segments: [
+            {
+              text: 'Благодать и мир.',
+              sourceStartMs: 0,
+              sourceEndMs: 2000,
+              final: true,
+              sequence: 0,
+            },
+          ],
+        },
+      });
+      expect(replay.statusCode).toBe(200);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        url: 'https://api.openai.com/v1/responses',
+        authorization: 'Bearer test-sharing-key',
+        body: { model: 'gpt-5.6-terra' },
+      });
+      expect(String(requests[0]!.body.input).includes('Reference name: Ephesus.')).toBe(shareNotes);
+      expect(String(requests[0]!.body.instructions)).toContain(
+        'never add material the speaker did not say',
+      );
+      const publicResponse = await server.inject({ url: '/api/public/service' });
+      expect(publicResponse.body).not.toContain('translationProfile');
+      expect(publicResponse.body).not.toContain('test-sharing-key');
+      expect(
+        publicResponse
+          .json()
+          .languages.every((language: { audioAvailable: boolean }) => !language.audioAvailable),
+      ).toBe(true);
+      const stopped = await server.inject({
+        method: 'POST',
+        url: '/api/sessions/current/stop',
+        headers: headers(),
+        payload: {},
+      });
+      expect(stopped.json().archive).toMatchObject({
+        sermonNotes: {
+          documentIds: shareNotes ? [note.json().id] : [],
+          sharedWithEconomy: shareNotes,
+        },
+        translationProfile: { id: 'economy', textModel: 'gpt-5.6-terra' },
+        engineVersions: { translation: 'delayed-original,openai-responses:gpt-5.6-terra' },
+      });
+    },
+  );
 
   it('cancels a prepared service without starting providers or creating an archive', async () => {
     const server = await testServer();
@@ -412,7 +466,7 @@ describe('processor vertical slice', () => {
       'content-type': 'application/json',
     };
     expect((await server.inject({ url: '/api/preflight', headers: scoped })).statusCode).toBe(200);
-    for (const url of ['/api/archives', '/api/context-documents', '/api/voice-profiles']) {
+    for (const url of ['/api/archives', '/api/voice-profiles']) {
       expect((await server.inject({ url, headers: scoped })).statusCode).toBe(401);
     }
     for (const url of ['/api/control/leases', '/api/sessions/current/replay']) {
@@ -420,6 +474,34 @@ describe('processor vertical slice', () => {
         (await server.inject({ method: 'POST', url, headers: scoped, payload: {} })).statusCode,
       ).toBe(401);
     }
+    const notes = await server.inject({
+      method: 'POST',
+      url: '/api/context-documents',
+      headers: {
+        ...scoped,
+        'content-type': 'text/plain',
+        'x-sermon-notes-filename': 'Scoped lesson.txt',
+      },
+      payload: 'A selected lesson note for translation.',
+    });
+    expect(notes.statusCode).toBe(201);
+    expect(
+      (await server.inject({ url: '/api/context-documents', headers: scoped })).json(),
+    ).toEqual([notes.json()]);
+    expect((await server.inject('/api/context-documents')).statusCode).toBe(401);
+    expect(
+      (
+        await server.inject({
+          method: 'POST',
+          url: '/api/context-documents',
+          headers: {
+            'content-type': 'text/plain',
+            'x-sermon-notes-filename': 'Unauthenticated.txt',
+          },
+          payload: 'No access',
+        })
+      ).statusCode,
+    ).toBe(401);
     const created = await Promise.all(
       [1, 2].map(() =>
         server.inject({
