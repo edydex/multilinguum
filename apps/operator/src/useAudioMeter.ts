@@ -47,7 +47,11 @@ function isTauriRuntime(): boolean {
   return '__TAURI_INTERNALS__' in window;
 }
 
-export function useAudioMeter(selectedDeviceId: string | undefined, active = true) {
+export function useAudioMeter(
+  selectedDeviceId: string | undefined,
+  active = false,
+  workletUrl = '/pcm-worklet.js',
+) {
   const [devices, setDevices] = useState<AudioDevice[]>([]);
   const [levelDb, setLevelDb] = useState(-60);
   const [activeChannel, setActiveChannel] = useState(0);
@@ -71,6 +75,7 @@ export function useAudioMeter(selectedDeviceId: string | undefined, active = tru
         cancelled = true;
       };
     }
+    if (!navigator.mediaDevices) return;
     const refreshDevices = async () => {
       const available = await navigator.mediaDevices.enumerateDevices();
       if (cancelled) return;
@@ -83,8 +88,8 @@ export function useAudioMeter(selectedDeviceId: string | undefined, active = tru
           })),
       );
     };
-    const handleDeviceChange = () => void refreshDevices();
-    void refreshDevices();
+    const handleDeviceChange = () => void refreshDevices().catch(() => undefined);
+    handleDeviceChange();
     navigator.mediaDevices.addEventListener('devicechange', handleDeviceChange);
     return () => {
       cancelled = true;
@@ -172,6 +177,10 @@ export function useAudioMeter(selectedDeviceId: string | undefined, active = tru
           autoGainControl: false,
         };
         stream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
         const available = await navigator.mediaDevices.enumerateDevices();
         if (!cancelled) {
           setDevices(
@@ -188,8 +197,17 @@ export function useAudioMeter(selectedDeviceId: string | undefined, active = tru
           setSampleRate(settings?.sampleRate ?? 48_000);
           setError(undefined);
         }
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          return;
+        }
         context = new AudioContext({ sampleRate: 48_000 });
-        await context.audioWorklet.addModule('/pcm-worklet.js');
+        await context.audioWorklet.addModule(workletUrl);
+        if (cancelled) {
+          stream.getTracks().forEach((track) => track.stop());
+          void context.close();
+          return;
+        }
         const source = context.createMediaStreamSource(stream);
         processor = new AudioWorkletNode(context, 'multilinguum-pcm');
         const silent = context.createGain();
@@ -211,6 +229,8 @@ export function useAudioMeter(selectedDeviceId: string | undefined, active = tru
           for (const listener of listeners.current) listener(frame);
         };
       } catch (cause) {
+        stream?.getTracks().forEach((track) => track.stop());
+        void context?.close();
         if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
       }
     };
@@ -221,7 +241,7 @@ export function useAudioMeter(selectedDeviceId: string | undefined, active = tru
       stream?.getTracks().forEach((track) => track.stop());
       void context?.close();
     };
-  }, [active, selectedDeviceId]);
+  }, [active, selectedDeviceId, workletUrl]);
 
   return {
     devices,

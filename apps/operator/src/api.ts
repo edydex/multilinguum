@@ -12,6 +12,10 @@ export interface OperatorConnection {
   token: string;
 }
 
+export function operatorUrl(path: string, base: string): URL {
+  return new URL(path.replace(/^\//, ''), base.endsWith('/') ? base : `${base}/`);
+}
+
 export function controlWebSocketProtocol(token: string): string {
   return `multilinguum-auth.${token}`;
 }
@@ -21,8 +25,9 @@ async function request<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
-  const response = await fetch(new URL(path, connection.baseUrl), {
+  const response = await fetch(operatorUrl(path, connection.baseUrl), {
     ...init,
+    cache: 'no-store',
     headers: {
       authorization: `Bearer ${connection.token}`,
       'content-type': 'application/json',
@@ -38,7 +43,7 @@ async function request<T>(
 }
 
 async function requestBlob(connection: OperatorConnection, path: string): Promise<Blob> {
-  const response = await fetch(new URL(path, connection.baseUrl), {
+  const response = await fetch(operatorUrl(path, connection.baseUrl), {
     headers: { authorization: `Bearer ${connection.token}` },
   });
   if (!response.ok) {
@@ -54,7 +59,7 @@ async function uploadVoiceSample(
   sample: File,
 ): Promise<VoiceProfile> {
   const response = await fetch(
-    new URL(`/api/voice-profiles/${encodeURIComponent(profileId)}/sample`, connection.baseUrl),
+    operatorUrl(`/api/voice-profiles/${encodeURIComponent(profileId)}/sample`, connection.baseUrl),
     {
       method: 'PUT',
       headers: {
@@ -79,7 +84,7 @@ async function uploadContextDocument(
     file.type === 'application/pdf' || file.name.toLocaleLowerCase().endsWith('.pdf')
       ? 'application/pdf'
       : 'text/plain';
-  const response = await fetch(new URL('/api/context-documents', connection.baseUrl), {
+  const response = await fetch(operatorUrl('/api/context-documents', connection.baseUrl), {
     method: 'POST',
     headers: {
       authorization: `Bearer ${connection.token}`,
@@ -99,10 +104,11 @@ export const api = {
   preflight: (connection: OperatorConnection) =>
     request<Record<string, unknown>>(connection, '/api/preflight'),
   current: (connection: OperatorConnection) =>
-    request<{ session?: ServiceSession; health: ChannelHealth[] }>(
-      connection,
-      '/api/sessions/current',
-    ),
+    request<{
+      session?: ServiceSession;
+      health: ChannelHealth[];
+      capture: { connected: boolean; ready: boolean };
+    }>(connection, '/api/sessions/current'),
   create: (connection: OperatorConnection, body: unknown) =>
     request<ServiceSession>(connection, '/api/sessions', {
       method: 'POST',
@@ -161,19 +167,21 @@ export function subscribe(
   connection: OperatorConnection,
   onEvent: (event: ProcessorEvent) => void,
   onState: (connected: boolean) => void,
-): () => void {
+): (() => void) & { renew(token: string): void } {
+  let token = connection.token;
   let stopped = false;
   let retryDelayMs = 1_000;
   let retryTimer: number | undefined;
   let socket: WebSocket | undefined;
 
   const connect = () => {
-    const url = new URL('/api/operator/events', connection.baseUrl);
+    const url = operatorUrl('/api/operator/events', connection.baseUrl);
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    socket = new WebSocket(url, controlWebSocketProtocol(connection.token));
+    socket = new WebSocket(url, controlWebSocketProtocol(token));
     socket.onopen = () => {
       retryDelayMs = 1_000;
       onState(true);
+      socket?.send(JSON.stringify({ type: 'renew-auth', token }));
     };
     socket.onmessage = (message) => onEvent(JSON.parse(String(message.data)) as ProcessorEvent);
     socket.onerror = () => socket?.close();
@@ -186,9 +194,18 @@ export function subscribe(
   };
 
   connect();
-  return () => {
-    stopped = true;
-    if (retryTimer !== undefined) window.clearTimeout(retryTimer);
-    socket?.close();
-  };
+  return Object.assign(
+    () => {
+      stopped = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+      socket?.close();
+    },
+    {
+      renew(next: string) {
+        token = next;
+        if (socket?.readyState === WebSocket.OPEN)
+          socket.send(JSON.stringify({ type: 'renew-auth', token }));
+      },
+    },
+  );
 }

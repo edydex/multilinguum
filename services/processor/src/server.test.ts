@@ -1,3 +1,5 @@
+import { once } from 'node:events';
+import { issueControlLease } from './control-access.js';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -87,6 +89,88 @@ function sessionRequest() {
 }
 
 describe('processor vertical slice', () => {
+  it('authenticates and renews a scoped operator WebSocket without disconnecting it', async () => {
+    const server = await testServer();
+    await server.ready();
+    const first = issueControlLease('community:1:user:2', controlToken);
+    const socket = await server.injectWS('/api/operator/events', {
+      headers: { 'sec-websocket-protocol': `multilinguum-auth.${first.token}` },
+    });
+    try {
+      const received = once(socket, 'message');
+      const next = issueControlLease('community:1:user:2', controlToken);
+      socket.send(JSON.stringify({ type: 'renew-auth', token: next.token }));
+      expect(JSON.parse(String((await received)[0]))).toMatchObject({
+        type: 'auth-renewed',
+        expiresAtUnixMs: next.expiresAtUnixMs,
+      });
+      const closed = once(socket, 'close');
+      socket.send(JSON.stringify({ type: 'renew-auth', token: controlToken }));
+      expect((await closed)[0]).toBe(1008);
+    } finally {
+      socket.terminate();
+    }
+  });
+
+  it('limits Community leases to live control and serializes concurrent service creation', async () => {
+    const server = await testServer();
+    const minted = await server.inject({
+      method: 'POST',
+      url: '/api/control/leases',
+      headers: headers(),
+      payload: { subject: 'community:1:user:2' },
+    });
+    expect(minted.statusCode).toBe(200);
+    expect(minted.headers['cache-control']).toContain('no-store');
+    const scoped = {
+      authorization: `Bearer ${minted.json().token}`,
+      'content-type': 'application/json',
+    };
+    expect((await server.inject({ url: '/api/preflight', headers: scoped })).statusCode).toBe(200);
+    for (const url of ['/api/archives', '/api/context-documents', '/api/voice-profiles']) {
+      expect((await server.inject({ url, headers: scoped })).statusCode).toBe(401);
+    }
+    for (const url of ['/api/control/leases', '/api/sessions/current/replay']) {
+      expect(
+        (await server.inject({ method: 'POST', url, headers: scoped, payload: {} })).statusCode,
+      ).toBe(401);
+    }
+    const created = await Promise.all(
+      [1, 2].map(() =>
+        server.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          headers: scoped,
+          payload: sessionRequest(),
+        }),
+      ),
+    );
+    expect(created.map((result) => result.statusCode).sort()).toEqual([200, 409]);
+    expect(
+      (
+        await server.inject({
+          method: 'POST',
+          url: '/api/sessions/current/start',
+          headers: scoped,
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(200);
+    const current = await server.inject({ url: '/api/sessions/current', headers: scoped });
+    expect(current.json().capture).toEqual({ connected: false, ready: false });
+    expect(current.headers['cache-control']).toContain('no-store');
+    expect(
+      (
+        await server.inject({
+          method: 'POST',
+          url: '/api/sessions/current/stop',
+          headers: scoped,
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(200);
+  });
+
   it('runs text with an unreachable configured relay and reports audio controls accurately', async () => {
     const server = await testServer({
       LIVEKIT_URL: 'wss://relay.invalid',

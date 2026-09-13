@@ -28,6 +28,7 @@ import { OpenAIRealtimeTranslationChannel } from './providers/openai-realtime-tr
 import { RealtimeCapturePipeline } from './realtime-capture-pipeline.js';
 import { SermonContextStore } from './context-store.js';
 import { registerListenerClient } from './listener-client.js';
+import { bindSocketAccess, issueControlLease, readControlAccess } from './control-access.js';
 
 const replaySchema = z.object({
   segments: z.array(transcriptInputSchema).min(1).max(10_000),
@@ -220,6 +221,22 @@ export async function buildServer(config: ProcessorConfig) {
     }
   };
 
+  const requireSessionControl = async (request: FastifyRequest, reply: FastifyReply) => {
+    reply.header('cache-control', 'private, no-store');
+    const authorization = request.headers.authorization ?? '';
+    const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    if (!readControlAccess(token, config.PROCESSOR_CONTROL_TOKEN))
+      return reply.code(401).send({ error: 'Control access expired or unauthorized' });
+  };
+  app.post('/api/control/leases', { preHandler: requireControl }, async (request, reply) => {
+    const { subject } = z
+      .object({ subject: z.string().min(1).max(128) })
+      .strict()
+      .parse(request.body);
+    reply.header('cache-control', 'private, no-store');
+    return issueControlLease(subject, config.PROCESSOR_CONTROL_TOKEN);
+  });
+
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) {
       return reply.code(400).send({ error: 'Invalid request', issues: error.issues });
@@ -231,7 +248,7 @@ export async function buildServer(config: ProcessorConfig) {
 
   app.get('/health', async () => ({ status: 'ok', version: '0.1.0' }));
 
-  app.get('/api/preflight', { preHandler: requireControl }, async () => {
+  app.get('/api/preflight', { preHandler: requireSessionControl }, async () => {
     const disk = await statfs(config.ARCHIVE_ROOT);
     const voice = clonedSpeech
       ? await clonedSpeech.health()
@@ -322,12 +339,13 @@ export async function buildServer(config: ProcessorConfig) {
 
   app.get('/api/operator/events', { websocket: true }, (socket, request) => {
     const token = webSocketControlToken(request);
-    const left = Buffer.from(token);
-    const right = Buffer.from(config.PROCESSOR_CONTROL_TOKEN);
-    if (left.length !== right.length || !timingSafeEqual(left, right)) {
+    const access = readControlAccess(token, config.PROCESSOR_CONTROL_TOKEN);
+    if (!access) {
       socket.close(1008, 'Unauthorized');
       return;
     }
+    const authorization = bindSocketAccess(socket, access, config.PROCESSOR_CONTROL_TOKEN);
+    socket.on('message', (message, binary) => authorization.consume(message, binary));
     operatorSockets.add(socket);
     const session = engine.current();
     if (session) socket.send(JSON.stringify({ type: 'session', session } satisfies ProcessorEvent));
@@ -340,22 +358,19 @@ export async function buildServer(config: ProcessorConfig) {
   let activeCapture:
     | {
         socket: WebSocket;
+        ready: boolean;
         close: () => Promise<void>;
         useCascadeForChannel: (channelId: string) => Promise<void>;
       }
     | undefined;
   app.get('/api/capture/audio', { websocket: true }, (socket, request) => {
     const query = request.query as { sessionId?: string };
-    const supplied = Buffer.from(webSocketControlToken(request));
-    const expected = Buffer.from(config.PROCESSOR_CONTROL_TOKEN);
+    const access = readControlAccess(
+      webSocketControlToken(request),
+      config.PROCESSOR_CONTROL_TOKEN,
+    );
     const session = engine.current();
-    if (
-      supplied.length !== expected.length ||
-      !timingSafeEqual(supplied, expected) ||
-      !session ||
-      session.id !== query.sessionId ||
-      session.state !== 'live'
-    ) {
+    if (!access || !session || session.id !== query.sessionId || session.state !== 'live') {
       socket.close(1008, 'Unauthorized or inactive session');
       return;
     }
@@ -374,6 +389,7 @@ export async function buildServer(config: ProcessorConfig) {
       socket.close(1013, 'Another capture console is already streaming');
       return;
     }
+    const authorization = bindSocketAccess(socket, access, config.PROCESSOR_CONTROL_TOKEN);
     const pipeline = new RealtimeCapturePipeline(
       engine,
       session,
@@ -398,15 +414,29 @@ export async function buildServer(config: ProcessorConfig) {
     };
     activeCapture = {
       socket,
+      ready: false,
       close: closePipeline,
       useCascadeForChannel: async (channelId) => {
         await ready;
         if (!startupError) pipeline.useCascadeForChannel(channelId);
       },
     };
+    void ready.then(() => {
+      if (
+        !startupError &&
+        socket.readyState === socket.OPEN &&
+        acceptingFrames &&
+        authorization.valid() &&
+        activeCapture?.socket === socket
+      ) {
+        activeCapture.ready = true;
+        socket.send(JSON.stringify({ type: 'capture-ready', sessionId: session.id }));
+      }
+    });
     socket.on('message', (message, isBinary) => {
       try {
-        if (!acceptingFrames) return;
+        if (authorization.consume(message, isBinary)) return;
+        if (!acceptingFrames || !authorization.valid()) return;
         if (!isBinary) throw new Error('Capture frames must be binary.');
         const packet = Buffer.isBuffer(message) ? message : Buffer.from(message as ArrayBuffer);
         if (packet.byteLength < 16) throw new Error('Capture frame header is incomplete.');
@@ -422,7 +452,7 @@ export async function buildServer(config: ProcessorConfig) {
         void ready
           .then(() => {
             if (startupError) throw startupError;
-            pipeline.push(frame, capturedAt);
+            if (acceptingFrames && authorization.valid()) pipeline.push(frame, capturedAt);
           })
           .catch((error) =>
             socket.close(
@@ -439,27 +469,40 @@ export async function buildServer(config: ProcessorConfig) {
     });
   });
 
-  app.post('/api/sessions', { preHandler: requireControl }, async (request) =>
-    engine.create(request.body),
+  // Serialize state transitions from concurrent Heritage and SyncShow controllers.
+  let transition = Promise.resolve();
+  const changeSession = <T>(action: () => Promise<T>): Promise<T> => {
+    const result = transition.then(action);
+    transition = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+  app.post('/api/sessions', { preHandler: requireSessionControl }, async (request) =>
+    changeSession(() => engine.create(request.body)),
   );
-  app.get('/api/sessions/current', { preHandler: requireControl }, async () => ({
+  app.get('/api/sessions/current', { preHandler: requireSessionControl }, async () => ({
     session: engine.current(),
     health: engine.health(),
+    capture: { connected: Boolean(activeCapture), ready: Boolean(activeCapture?.ready) },
   }));
-  app.post('/api/sessions/current/start', { preHandler: requireControl }, async () =>
-    engine.start(),
+  app.post('/api/sessions/current/start', { preHandler: requireSessionControl }, async () =>
+    changeSession(() => engine.start()),
   );
-  app.post('/api/sessions/current/stop', { preHandler: requireControl }, async () => {
-    const capture = activeCapture;
-    if (capture) {
-      const draining = capture.close();
-      if (capture.socket.readyState === capture.socket.OPEN) {
-        capture.socket.close(1000, 'Service stopping');
+  app.post('/api/sessions/current/stop', { preHandler: requireSessionControl }, async () =>
+    changeSession(async () => {
+      const capture = activeCapture;
+      if (capture) {
+        const draining = capture.close();
+        if (capture.socket.readyState === capture.socket.OPEN) {
+          capture.socket.close(1000, 'Service stopping');
+        }
+        await draining;
       }
-      await draining;
-    }
-    return engine.stop();
-  });
+      return engine.stop();
+    }),
+  );
   app.post('/api/sessions/current/replay', { preHandler: requireControl }, async (request) => {
     const replay = replaySchema.parse(request.body);
     const translated = [];
@@ -471,7 +514,7 @@ export async function buildServer(config: ProcessorConfig) {
   });
   app.post(
     '/api/sessions/current/channels/:channelId',
-    { preHandler: requireControl },
+    { preHandler: requireSessionControl },
     async (request) => {
       const { channelId } = request.params as { channelId: string };
       const action = channelActionSchema.parse(request.body);

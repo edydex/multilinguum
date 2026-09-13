@@ -172,11 +172,12 @@ export function App() {
     () => localStorage.getItem('audioDeviceId') || undefined,
   );
   const [audioReady, setAudioReady] = useState(false);
+  const [captureRequested, setCaptureRequested] = useState(false);
   const [boothDeviceLabel, setBoothDeviceLabel] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [playbackUrl, setPlaybackUrl] = useState<string>();
-  const audio = useAudioMeter(selectedDeviceId, audioReady);
+  const audio = useAudioMeter(selectedDeviceId, audioReady && captureRequested);
   const {
     devices,
     levelDb,
@@ -198,7 +199,7 @@ export function App() {
   const displayedLanguages: Language[] =
     live && session ? session.targets.map((channel) => channel.targetLanguage) : allLanguages;
   const capture = useAudioStreamer(
-    session?.state === 'live',
+    captureRequested && session?.state === 'live',
     session?.id,
     connection,
     subscribePcm,
@@ -569,9 +570,17 @@ export function App() {
                     <h2>Mixer feed</h2>
                   </div>
                   <span className="ok">
-                    {capture.streaming ? 'Streaming' : 'Ready'} · 48 kHz mono · shared input
+                    {capture.streaming
+                      ? 'Streaming'
+                      : captureRequested
+                        ? 'Input connected'
+                        : 'Control only'}{' '}
+                    · 48 kHz mono · shared input
                   </span>
                 </div>
+                <button onClick={() => setCaptureRequested((value) => !value)}>
+                  {captureRequested ? 'Disconnect this mixer' : 'Connect this mixer'}
+                </button>
                 <label>
                   Audio device
                   <select
@@ -602,7 +611,10 @@ export function App() {
                   {channelCount > 1
                     ? `using channel ${activeChannel + 1} of ${channelCount}`
                     : 'single input channel'}
-                  . One shared read-only stream is open; OBS may use the same device.
+                  .{' '}
+                  {captureRequested
+                    ? 'This console has opened the selected input; OBS may use the same device.'
+                    : 'Connect the mixer only on the computer receiving the church audio feed.'}
                 </p>
               </section>
 

@@ -19,7 +19,9 @@ export function registerListenerClient(
         .header('x-content-type-options', 'nosniff')
         .header(
           'cache-control',
-          file === 'heritage.js' ? 'no-cache' : 'public, max-age=31536000, immutable',
+          ['heritage.js', 'operator.js', 'pcm-worklet.js'].includes(file)
+            ? 'no-cache'
+            : 'public, max-age=31536000, immutable',
         )
         .send(body);
     } catch (cause) {

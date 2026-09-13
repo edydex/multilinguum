@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { controlWebSocketProtocol, type OperatorConnection } from './api';
+import { useEffect, useRef, useState } from 'react';
+import { controlWebSocketProtocol, operatorUrl, type OperatorConnection } from './api';
 import type { CapturedPcmFrame } from './useAudioMeter';
 
 export function useAudioStreamer(
@@ -10,60 +10,92 @@ export function useAudioStreamer(
 ) {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string>();
+  const token = useRef(connection.token);
+  const currentSocket = useRef<WebSocket | undefined>(undefined);
+  token.current = connection.token;
+
+  // Renew authorization in place: changing a short-lived lease must not reopen the mixer.
+  useEffect(() => {
+    if (currentSocket.current?.readyState === WebSocket.OPEN) {
+      currentSocket.current.send(JSON.stringify({ type: 'renew-auth', token: connection.token }));
+    }
+  }, [connection.token]);
 
   useEffect(() => {
-    if (!enabled || !sessionId) {
-      setStreaming(false);
-      return;
-    }
+    setStreaming(false);
+    setError(undefined);
+    if (!enabled || !sessionId) return;
     let cancelled = false;
-    let socket: WebSocket | undefined;
     let unsubscribePcm: (() => void) | undefined;
     let sequence = 0;
-
-    const start = async () => {
+    const url = operatorUrl('/api/capture/audio', connection.baseUrl);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.searchParams.set('sessionId', sessionId);
+    const socket = new WebSocket(url, controlWebSocketProtocol(token.current));
+    currentSocket.current = socket;
+    socket.binaryType = 'arraybuffer';
+    const fail = (message: string) => {
+      if (cancelled) return;
+      unsubscribePcm?.();
+      unsubscribePcm = undefined;
+      setStreaming(false);
+      setError(message);
+      socket.close(1000, 'Audio input disconnected');
+    };
+    const timeout = window.setTimeout(
+      () => fail('The processor did not become ready. Reconnect the mixer to try again.'),
+      20000,
+    );
+    socket.onopen = () => socket.send(JSON.stringify({ type: 'renew-auth', token: token.current }));
+    socket.onmessage = (message) => {
+      if (cancelled) return;
+      let event: { type?: string; sessionId?: string };
       try {
-        const url = new URL('/api/capture/audio', connection.baseUrl);
-        url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-        url.searchParams.set('sessionId', sessionId);
-        socket = new WebSocket(url, controlWebSocketProtocol(connection.token));
-        socket.binaryType = 'arraybuffer';
-        await new Promise<void>((resolve, reject) => {
-          if (!socket) return reject(new Error('Capture socket was not created.'));
-          socket.onopen = () => resolve();
-          socket.onerror = () => reject(new Error('Could not connect the capture stream.'));
-          socket.onclose = (event) => {
-            if (!cancelled && event.code !== 1000)
-              setError(event.reason || 'Capture stream closed.');
-            setStreaming(false);
-          };
-        });
-        if (cancelled) return;
-        unsubscribePcm = subscribePcm((frame) => {
-          if (socket?.readyState !== WebSocket.OPEN) return;
-          const samples = new Uint8Array(frame.pcm);
-          const packet = new ArrayBuffer(16 + samples.byteLength);
-          const view = new DataView(packet);
-          view.setUint32(0, sequence++, true);
-          view.setFloat64(4, frame.capturedAtUnixMs, true);
-          view.setUint32(12, samples.byteLength / 2, true);
-          new Uint8Array(packet, 16).set(samples);
-          socket.send(packet);
-        });
-        setError(undefined);
-        setStreaming(true);
-      } catch (cause) {
-        if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
+        event = JSON.parse(String(message.data));
+      } catch {
+        return;
+      }
+      if (event.type !== 'capture-ready' || event.sessionId !== sessionId || unsubscribePcm) return;
+      window.clearTimeout(timeout);
+      unsubscribePcm = subscribePcm((frame) => {
+        if (socket.readyState !== WebSocket.OPEN) return;
+        // Never accumulate stale sermon audio when a connection cannot keep up.
+        if (socket.bufferedAmount > 192000) {
+          fail(
+            'The connection is too slow for live audio. Reconnect the mixer when the network recovers.',
+          );
+          return;
+        }
+        const samples = new Uint8Array(frame.pcm);
+        const packet = new ArrayBuffer(16 + samples.byteLength);
+        const view = new DataView(packet);
+        view.setUint32(0, sequence++, true);
+        view.setFloat64(4, frame.capturedAtUnixMs, true);
+        view.setUint32(12, samples.byteLength / 2, true);
+        new Uint8Array(packet, 16).set(samples);
+        socket.send(packet);
+      });
+      setStreaming(true);
+      setError(undefined);
+    };
+    socket.onerror = () => fail('Could not connect the mixer stream.');
+    socket.onclose = (event) => {
+      window.clearTimeout(timeout);
+      unsubscribePcm?.();
+      unsubscribePcm = undefined;
+      if (!cancelled) {
+        setStreaming(false);
+        setError(event.reason || 'Audio input disconnected. Reconnect the mixer to continue.');
       }
     };
-    void start();
     return () => {
       cancelled = true;
-      setStreaming(false);
+      window.clearTimeout(timeout);
       unsubscribePcm?.();
-      socket?.close(1000, 'Service stopped');
+      if (currentSocket.current === socket) currentSocket.current = undefined;
+      socket.close(1000, 'Audio input disconnected');
     };
-  }, [connection.baseUrl, connection.token, enabled, sessionId, subscribePcm]);
+  }, [connection.baseUrl, enabled, sessionId, subscribePcm]);
 
   return { streaming, error };
 }
