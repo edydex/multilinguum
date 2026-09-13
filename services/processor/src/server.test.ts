@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -325,5 +325,88 @@ describe('processor vertical slice', () => {
     });
     expect(created.statusCode).toBe(200);
     expect(created.json().contextDocumentIds).toEqual([uploaded.json().id]);
+  });
+});
+
+describe('public Heritage client contract', () => {
+  it('serves only installed JavaScript and keeps operator access private across origins', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'multilinguum-client-'));
+    await writeFile(path.join(root, 'heritage.js'), 'export const clientVersion = 1;');
+    await writeFile(path.join(root, 'livekit-client.esm-123.js'), 'export {};');
+    await writeFile(path.join(root, 'private.env'), 'not public');
+    const server = await testServer({ NODE_ENV: 'production', LISTENER_CLIENT_ROOT: root });
+    for (const url of [
+      '/client/heritage.js',
+      '/client/livekit-client.esm-123.js',
+      '/api/public/service',
+    ]) {
+      const response = await server.inject({
+        url,
+        headers: { origin: 'https://another-church.example' },
+      });
+      expect(response.statusCode).toBe(200);
+      expect(response.headers['access-control-allow-origin']).toBe('*');
+    }
+    for (const url of [
+      '/client/missing.js',
+      '/client/private.env',
+      '/client/%2e%2e%2fprivate.env',
+    ]) {
+      expect((await server.inject({ url })).statusCode).toBe(404);
+    }
+    const operator = await server.inject({
+      url: '/api/preflight',
+      headers: { origin: 'https://another-church.example' },
+    });
+    expect(operator.statusCode).toBe(401);
+    expect(operator.headers['access-control-allow-origin']).toBeUndefined();
+  });
+
+  it('publishes availability updates without private session or health configuration', async () => {
+    const server = await testServer();
+    await server.ready();
+    const socket = await server.injectWS('/api/public/events');
+    const events: Array<{
+      type: string;
+      state?: { active: boolean; languages: Array<{ audioAvailable?: boolean }> };
+    }> = [];
+    socket.on('message', (data) => {
+      events.push(JSON.parse(data.toString()));
+    });
+    try {
+      const request = sessionRequest();
+      request.targets = request.targets.slice(0, 2);
+      await server.inject({
+        method: 'POST',
+        url: '/api/sessions',
+        headers: headers(),
+        payload: {
+          ...request,
+          targets: request.targets.map((channel) => ({ ...channel, speechEnabled: false })),
+        },
+      });
+      await server.inject({
+        method: 'POST',
+        url: '/api/sessions/current/start',
+        headers: headers(),
+        payload: {},
+      });
+      const muted = await server.inject({
+        method: 'POST',
+        url: '/api/sessions/current/channels/channel-en',
+        headers: headers(),
+        payload: { muted: true },
+      });
+      expect(muted.statusCode).toBe(200);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(events.some((event) => event.type === 'public-state' && event.state?.active)).toBe(
+        true,
+      );
+      expect(events.every((event) => event.type === 'public-state')).toBe(true);
+      expect(JSON.stringify(events)).not.toContain('identityFingerprint');
+      expect(JSON.stringify(events)).not.toContain('processingNode');
+    } finally {
+      socket.terminate();
+    }
   });
 });

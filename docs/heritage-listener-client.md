@@ -1,0 +1,28 @@
+# Shared Heritage live client, version 1
+
+The listener build produces the standalone listener and `dist/client/heritage.js` with its JavaScript chunks. Heritage imports `clientVersion` and `mount(element, options)` from that public module. `mount` returns a cleanup function. Options contain only `apiBase`, `churchName`, an optional 11-character YouTube `videoId`, and an optional public `channelUrl`.
+
+The processor Docker image includes the built client under `/app/client`; `/client/:file` serves only flat JavaScript filenames. Development runs can set `LISTENER_CLIENT_ROOT` to the listener's `dist/client` directory. The listener Worker distributes the same build. Missing modules return 404, not the SPA shell. Module and anonymous API responses allow cross-origin public reading; operator authentication and its origin restrictions remain separate.
+
+A cohosted Heritage deployment routes these public paths:
+
+- `/translation/client/:file` → processor `/client/:file`
+- `/translation/api/public/service`, `/events`, and `/token` → corresponding processor public endpoints, including the events WebSocket
+
+Heritage's build-time `TRANSLATION_PROCESSOR_URL` defaults to `http://translation-processor:4310`. Its public church setting is `/translate`. No processor control routes or provider credentials are exposed through these rewrites. An external listener base URL is also supported; a path prefix must be the base where `client/` and `api/public/` live.
+
+Deploy the processor and listener client together. This client requires public-state heartbeats (10 seconds); after 30 seconds without events it closes the connection, stops translated playback, and reconnects. Reconnection, session replacement, and operator audio-off never automatically resume a listener's stopped audio. Private session/health configuration is no longer broadcast on the public socket.
+
+## Listener behavior
+
+Text language and audio are independent. The text preference is retained on the same browser; audio always requires a new listener choice after navigation. `/live` uses YouTube for original audio and excludes the separate delayed source track. `/translate` can offer the source track without a video. Selecting translation stops previous audio and waits for the YouTube API to confirm muting. Selecting original audio stops translated audio synchronously before unmuting YouTube. Pausing, ending, or detecting a seek stops translated playback.
+
+YouTube's documented API has no volume-change event. Native unmuting is observed every 200 ms; this bounds detection, but is not proof that manually operating native YouTube controls can never create momentary overlap. The controlled audio choices are covered by ordering and cancellation tests. Actual YouTube/LiveKit playback still requires a browser service rehearsal.
+
+“Float translation” opens a resizable panel on the page. Its “Pop out” control uses Document Picture-in-Picture when available; rejection retains the page panel. Audio remains owned by the parent player, so moving caption controls does not create another media connection. A browser which closes a native floating window returns the controls to the page.
+
+## Remaining acceptance
+
+The broadcast delay church setting is not applied by this client yet. There is no claim of video/translation alignment. A real live/DVR rehearsal must establish capture timestamps, translation playout, broadcast delay, seek handling, and phone playback before the combined audio experience is accepted.
+
+The local Codex browser rendered and switched both synthetic language feeds through Heritage, and floated/returned the page panel. YouTube remained blank in both the integrated player and an independent plain-iframe comparison; its direct embed reported missing-referrer error 153. This is not successful video playback evidence. Native Document PiP and phone-size playback remain unverified in that browser.

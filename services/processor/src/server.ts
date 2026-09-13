@@ -27,6 +27,7 @@ import { OpenAILiveTranscriber } from './providers/openai-live-transcriber.js';
 import { OpenAIRealtimeTranslationChannel } from './providers/openai-realtime-translation.js';
 import { RealtimeCapturePipeline } from './realtime-capture-pipeline.js';
 import { SermonContextStore } from './context-store.js';
+import { registerListenerClient } from './listener-client.js';
 
 const replaySchema = z.object({
   segments: z.array(transcriptInputSchema).min(1).max(10_000),
@@ -112,6 +113,7 @@ export async function buildServer(config: ProcessorConfig) {
         : true,
   });
   await app.register(websocket);
+  registerListenerClient(app, config.LISTENER_CLIENT_ROOT);
 
   const operatorSockets = new Set<WebSocket>();
   const publicSockets = new Set<WebSocket>();
@@ -151,8 +153,13 @@ export async function buildServer(config: ProcessorConfig) {
       if (socket.readyState === socket.OPEN) socket.send(payload);
     }
     if (event.type === 'transcript' || event.type === 'session' || event.type === 'health') {
+      // Public listeners need availability, never private session configuration or health details.
+      const publicPayload =
+        event.type === 'transcript'
+          ? payload
+          : JSON.stringify({ type: 'public-state', state: publicState(config, engine) });
       for (const socket of publicSockets) {
-        if (socket.readyState === socket.OPEN) socket.send(payload);
+        if (socket.readyState === socket.OPEN) socket.send(publicPayload);
       }
     }
   };
@@ -252,9 +259,13 @@ export async function buildServer(config: ProcessorConfig) {
     };
   });
 
-  app.get('/api/public/service', async () => publicState(config, engine));
+  app.get('/api/public/service', { config: { cors: { origin: '*' } } }, async (_request, reply) => {
+    reply.header('cache-control', 'no-store');
+    return publicState(config, engine);
+  });
 
-  app.get('/api/public/token', async (request, reply) => {
+  app.get('/api/public/token', { config: { cors: { origin: '*' } } }, async (request, reply) => {
+    reply.header('cache-control', 'no-store');
     const session = engine.current();
     if (session?.state !== 'live' || !session.relayRoom) {
       return reply.code(404).send({ error: 'No live service.' });
@@ -288,14 +299,26 @@ export async function buildServer(config: ProcessorConfig) {
     };
   });
 
-  app.get('/api/public/events', { websocket: true }, (socket) => {
-    publicSockets.add(socket);
-    socket.send(JSON.stringify({ type: 'public-state', state: publicState(config, engine) }));
-    for (const events of captionHistory.values()) {
-      for (const event of events) socket.send(JSON.stringify(event));
+  app.get(
+    '/api/public/events',
+    { websocket: true, config: { cors: { origin: '*' } } },
+    (socket) => {
+      publicSockets.add(socket);
+      socket.send(JSON.stringify({ type: 'public-state', state: publicState(config, engine) }));
+      for (const events of captionHistory.values()) {
+        for (const event of events) socket.send(JSON.stringify(event));
+      }
+      socket.on('close', () => publicSockets.delete(socket));
+    },
+  );
+  const publicHeartbeat = setInterval(() => {
+    const message = JSON.stringify({ type: 'public-state', state: publicState(config, engine) });
+    for (const socket of publicSockets) {
+      if (socket.readyState === socket.OPEN) socket.send(message);
     }
-    socket.on('close', () => publicSockets.delete(socket));
-  });
+  }, 10000);
+  publicHeartbeat.unref();
+  app.addHook('onClose', async () => clearInterval(publicHeartbeat));
 
   app.get('/api/operator/events', { websocket: true }, (socket, request) => {
     const token = webSocketControlToken(request);

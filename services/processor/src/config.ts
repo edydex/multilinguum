@@ -38,6 +38,7 @@ const environmentSchema = z.object({
   VOICE_WORKER_URL: optionalUrl,
   VOICE_WORKER_TOKEN: z.string().min(24).default('development-voice-token-change-me'),
   CHURCH_NAME: z.string().default('Word of Truth'),
+  LISTENER_CLIENT_ROOT: optionalString,
 });
 
 export type ProcessorConfig = ReturnType<typeof loadConfig>;
