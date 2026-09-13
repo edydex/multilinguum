@@ -125,6 +125,15 @@ input[type='checkbox'] {
   font-size: 13px;
   color: #597062;
 }
+.profile-details summary {
+  cursor: pointer;
+  font-size: 14px;
+  color: #245d42;
+  margin: 12px 0;
+}
+.profile-details p {
+  overflow-wrap: anywhere;
+}
 .notice {
   border: 1px solid #e8c88d;
   background: #fff8e8;

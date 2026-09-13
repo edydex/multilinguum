@@ -3,7 +3,7 @@ import { issueControlLease } from './control-access.js';
 import { mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { loadConfig } from './config.js';
 import { buildServer } from './server.js';
@@ -13,6 +13,7 @@ const servers: FastifyInstance[] = [];
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
+  vi.unstubAllGlobals();
 });
 
 async function testServer(overrides: NodeJS.ProcessEnv = {}) {
@@ -89,6 +90,198 @@ function sessionRequest() {
 }
 
 describe('processor vertical slice', () => {
+  it('advertises profile readiness without secrets and rejects unavailable selection before creating a session', async () => {
+    const server = await testServer({ OPENAI_API_KEY: 'test-audio-key' });
+    const preflight = await server.inject({ url: '/api/preflight', headers: headers() });
+    expect(preflight.body).not.toContain('test-audio-key');
+    expect(preflight.json().translationProfiles).toMatchObject([
+      { id: 'quality', ready: true, textModel: 'gpt-6-astra', allowanceVerified: false },
+      { id: 'economy', ready: false },
+    ]);
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: { ...sessionRequest(), translationProfile: 'economy' },
+    });
+    expect(response.statusCode).toBe(409);
+    expect(
+      (await server.inject({ url: '/api/sessions/current', headers: headers() })).json().session,
+    ).toBeUndefined();
+  });
+
+  it('rejects Economy note attachments and attempts to bypass its text-only provider route', async () => {
+    const server = await testServer({
+      OPENAI_API_KEY: 'test-audio-key',
+      OPENAI_ECONOMY_TEXT_API_KEY: 'test-sharing-key',
+      OPENAI_ECONOMY_SHARING_CONFIRMED: 'true',
+      OPENAI_ECONOMY_OVERAGE_POLICY: 'allow-billed',
+    });
+    const body = {
+      ...sessionRequest(),
+      translationProfile: 'economy',
+      targets: sessionRequest()
+        .targets.slice(0, 2)
+        .map((target) => ({
+          ...target,
+          translationProvider: target.voiceMode === 'source' ? 'deterministic' : 'openai-cascade',
+          speechEnabled: false,
+        })),
+    };
+    const notes = await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: { ...body, contextDocumentIds: ['10000000-0000-4000-8000-000000000001'] },
+    });
+    expect(notes.statusCode).toBe(409);
+    expect(notes.json().error).toContain('private sermon-note');
+    const bypass = await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: {
+        ...body,
+        targets: body.targets.map((target) => ({
+          ...target,
+          translationProvider: 'openai-realtime',
+        })),
+      },
+    });
+    expect(bypass.statusCode).toBe(409);
+    expect(bypass.json().error).toContain('optional separate speech');
+  });
+
+  it('runs a text-only Economy service, archives its model choice, and makes no speech requests', async () => {
+    const requests: Array<{
+      url: string;
+      authorization: string | null;
+      body: Record<string, unknown>;
+    }> = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        requests.push({
+          url: String(url),
+          authorization: new Headers(init.headers).get('authorization'),
+          body: JSON.parse(init.body as string),
+        });
+        return Response.json({
+          id: 'resp_fixture',
+          object: 'response',
+          status: 'completed',
+          output: [
+            {
+              type: 'message',
+              id: 'msg_fixture',
+              role: 'assistant',
+              status: 'completed',
+              content: [
+                {
+                  type: 'output_text',
+                  annotations: [],
+                  text: JSON.stringify({
+                    translation: 'Grace and peace.',
+                    narrationPlan: {
+                      role: 'neutral',
+                      cadence: 'flowing',
+                      arc: 'standalone',
+                      pauseBefore: 'none',
+                      pauseAfter: 'full',
+                      emphasis: [],
+                      beats: [],
+                    },
+                  }),
+                },
+              ],
+            },
+          ],
+        });
+      }),
+    );
+    const server = await testServer({
+      OPENAI_API_KEY: 'test-audio-key',
+      OPENAI_ECONOMY_TEXT_API_KEY: 'test-sharing-key',
+      OPENAI_ECONOMY_SHARING_CONFIRMED: 'true',
+      OPENAI_ECONOMY_OVERAGE_POLICY: 'allow-billed',
+    });
+    const response = await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: {
+        ...sessionRequest(),
+        translationProfile: 'economy',
+        targets: sessionRequest()
+          .targets.slice(0, 2)
+          .map((target) => ({
+            ...target,
+            translationProvider: target.voiceMode === 'source' ? 'deterministic' : 'openai-cascade',
+            speechEnabled: false,
+          })),
+      },
+    });
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      translationProfile: { id: 'economy' },
+      costEstimateKind: 'transcription-only',
+      estimatedCostUsd: 2.04,
+    });
+    expect(requests).toHaveLength(0);
+    expect(
+      (
+        await server.inject({
+          method: 'POST',
+          url: '/api/sessions/current/start',
+          headers: headers(),
+          payload: {},
+        })
+      ).statusCode,
+    ).toBe(200);
+    expect(requests).toHaveLength(0);
+    const replay = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/replay',
+      headers: headers(),
+      payload: {
+        segments: [
+          {
+            text: 'Благодать и мир.',
+            sourceStartMs: 0,
+            sourceEndMs: 2000,
+            final: true,
+            sequence: 0,
+          },
+        ],
+      },
+    });
+    expect(replay.statusCode).toBe(200);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      url: 'https://api.openai.com/v1/responses',
+      authorization: 'Bearer test-sharing-key',
+      body: { model: 'gpt-5.6-terra' },
+    });
+    const publicResponse = await server.inject({ url: '/api/public/service' });
+    expect(publicResponse.body).not.toContain('translationProfile');
+    expect(publicResponse.body).not.toContain('test-sharing-key');
+    expect(
+      publicResponse
+        .json()
+        .languages.every((language: { audioAvailable: boolean }) => !language.audioAvailable),
+    ).toBe(true);
+    const stopped = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/stop',
+      headers: headers(),
+      payload: {},
+    });
+    expect(stopped.json().archive).toMatchObject({
+      translationProfile: { id: 'economy', textModel: 'gpt-5.6-terra' },
+      engineVersions: { translation: 'delayed-original,openai-responses:gpt-5.6-terra' },
+    });
+  });
+
   it('cancels a prepared service without starting providers or creating an archive', async () => {
     const server = await testServer();
     await server.inject({

@@ -74,6 +74,7 @@ export class FileArchiveStore implements ArchiveStore {
       createdAt: session.createdAt,
       sourceLanguage: session.sourceLanguage,
       engineVersions,
+      ...(session.translationProfile ? { translationProfile: session.translationProfile } : {}),
       audioTracks: session.targets.map((channel) => ({
         channelId: channel.id,
         language: channel.targetLanguage,

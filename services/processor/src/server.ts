@@ -29,6 +29,7 @@ import { RealtimeCapturePipeline } from './realtime-capture-pipeline.js';
 import { SermonContextStore } from './context-store.js';
 import { registerListenerClient } from './listener-client.js';
 import { bindSocketAccess, issueControlLease, readControlAccess } from './control-access.js';
+import { resolveTranslationProfile, translationProfileInfo } from './translation-profiles.js';
 
 const replaySchema = z.object({
   segments: z.array(transcriptInputSchema).min(1).max(10_000),
@@ -202,6 +203,7 @@ export async function buildServer(config: ProcessorConfig) {
     profiles,
     deterministicTranslation,
     deterministicSpeech,
+    resolveTranslationProfile: (id) => resolveTranslationProfile(config, id),
     broadcast,
     ...(cloudTranslation ? { cloudTranslation } : {}),
     ...(naturalSpeech ? { naturalSpeech } : {}),
@@ -273,6 +275,9 @@ export async function buildServer(config: ProcessorConfig) {
         transcriptionModel: config.OPENAI_TRANSCRIBE_MODEL,
         liveAccessVerified: false,
       },
+      translationProfiles: (['quality', 'economy'] as const).map((id) =>
+        translationProfileInfo(config, id),
+      ),
       livekit: {
         configured: Boolean(
           config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET,

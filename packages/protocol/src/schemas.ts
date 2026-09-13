@@ -32,6 +32,7 @@ export const channelConfigSchema = z
   });
 
 export const createSessionSchema = z.object({
+  translationProfile: z.enum(['quality', 'economy']).optional(),
   sourceLanguage: sourceLanguageSchema,
   targets: z.array(channelConfigSchema).min(1).max(4),
   processingNode: z.object({

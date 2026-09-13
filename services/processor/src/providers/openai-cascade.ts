@@ -304,10 +304,16 @@ export class OpenAITextTranslationProvider implements TranslationProvider {
   readonly name: string;
   readonly #client: OpenAI;
   readonly #model: string;
+  readonly #options: { reasoningEffort?: 'none' | 'low'; maxOutputTokens?: number };
 
-  constructor(apiKey: string, model: string) {
-    this.#client = new OpenAI({ apiKey });
+  constructor(
+    apiKey: string,
+    model: string,
+    options: { reasoningEffort?: 'none' | 'low'; maxOutputTokens?: number } = {},
+  ) {
+    this.#client = new OpenAI({ apiKey, maxRetries: 0, timeout: 30_000 });
     this.#model = model;
+    this.#options = options;
     this.name = `openai-responses:${model}`;
   }
 
@@ -317,6 +323,13 @@ export class OpenAITextTranslationProvider implements TranslationProvider {
   ): Promise<TranscriptSegment> {
     const response = await this.#client.responses.create({
       model: this.#model,
+      store: false,
+      ...(this.#options.reasoningEffort
+        ? { reasoning: { effort: this.#options.reasoningEffort } }
+        : {}),
+      ...(this.#options.maxOutputTokens
+        ? { max_output_tokens: this.#options.maxOutputTokens }
+        : {}),
       instructions:
         'Translate church sermon speech faithfully. Preserve Scripture meaning, names, numbers, ' +
         'genuine sentence restarts, and emphasis. Normalize recognition fragments into one ' +

@@ -15,6 +15,7 @@ import type {
   SourceProcessingTiming,
   TranscriptSegment,
   TranslationProvider,
+  TranslationProfileId,
   VoiceProfile,
 } from '@multilinguum/protocol';
 import { createSessionSchema, estimateCloudServiceCost } from '@multilinguum/protocol';
@@ -22,6 +23,7 @@ import { defaultGlossary } from './glossary.js';
 import { buildLatencyBreakdown, summarizeLatency } from './latency.js';
 import type { SermonContextStore } from './context-store.js';
 import type { VoiceProfileStore } from './voice-profile-store.js';
+import type { ResolvedTranslationProfile } from './translation-profiles.js';
 import {
   buildCaptionWordTimings,
   estimateSpeechDurationMs,
@@ -38,6 +40,7 @@ export interface SessionEngineDependencies {
   context: SermonContextStore;
   deterministicTranslation: TranslationProvider;
   cloudTranslation?: TranslationProvider;
+  resolveTranslationProfile?: (id: TranslationProfileId) => ResolvedTranslationProfile;
   deterministicSpeech: SpeechRenderer;
   naturalSpeech?: SpeechRenderer;
   clonedSpeech?: SpeechRenderer;
@@ -64,6 +67,7 @@ interface RuntimeChannel {
 export class SessionEngine {
   readonly #dependencies: SessionEngineDependencies;
   #session?: ServiceSession;
+  #profile: ResolvedTranslationProfile | undefined;
   readonly #channels = new Map<string, RuntimeChannel>();
   readonly #sourceAudioSpans = new Map<number, LatencySpan>();
 
@@ -98,6 +102,25 @@ export class SessionEngine {
       throw new Error('Only one church service can be active at a time.');
     }
     const parsed = createSessionSchema.parse(input);
+    const profile = parsed.translationProfile
+      ? this.#dependencies.resolveTranslationProfile?.(parsed.translationProfile)
+      : undefined;
+    if (parsed.translationProfile && !profile)
+      throw new Error('Translation profiles are not configured on this processor.');
+    if (
+      profile &&
+      parsed.targets.some(
+        (target) =>
+          target.voiceMode !== 'source' && target.translationProvider !== 'openai-cascade',
+      )
+    )
+      throw new Error(
+        'Translation profiles require text translation with optional separate speech.',
+      );
+    if (profile?.info.id === 'economy' && parsed.contextDocumentIds.length)
+      throw new Error(
+        'Economy cannot send private sermon-note attachments to the sharing project.',
+      );
     await this.#dependencies.context.require(parsed.contextDocumentIds);
     const targets: ChannelConfig[] = parsed.targets.map((target) => ({
       id: target.id,
@@ -146,8 +169,18 @@ export class SessionEngine {
       archivePolicy: parsed.archivePolicy,
       configurationLocked: false,
       budgetWarningUsd: parsed.budgetWarningUsd,
-      estimatedCostUsd: estimateCloudServiceCost(parsed.expectedDurationMinutes, targets),
+      estimatedCostUsd: profile
+        ? Number(
+            (
+              parsed.expectedDurationMinutes * (profile.info.rates.transcriptionPerMinuteUsd ?? 0)
+            ).toFixed(2),
+          )
+        : estimateCloudServiceCost(parsed.expectedDurationMinutes, targets),
+      ...(profile
+        ? { translationProfile: profile.info, costEstimateKind: 'transcription-only' as const }
+        : {}),
     };
+    this.#profile = profile;
     this.#session = session;
     this.#channels.clear();
     this.#sourceAudioSpans.clear();
@@ -1027,6 +1060,7 @@ export class SessionEngine {
     if (config?.translationProvider === 'deterministic') {
       return this.#dependencies.deterministicTranslation;
     }
+    if (this.#profile) return this.#profile.provider;
     return this.#dependencies.cloudTranslation ?? this.#dependencies.deterministicTranslation;
   }
 

@@ -1,5 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { TranscriptSegment } from '@multilinguum/protocol';
+import type {
+  TranscriptSegment,
+  TranslationProfileId,
+  TranslationProfileInfo,
+} from '@multilinguum/protocol';
 import { api, operatorUrl, subscribe } from './api';
 import { useAudioMeter } from './useAudioMeter';
 import { useAudioStreamer } from './useAudioStreamer';
@@ -15,7 +19,11 @@ export interface ManagedOperatorOptions {
   requestAccess(): Promise<ControlLease>;
 }
 type Snapshot = Awaited<ReturnType<typeof api.current>>;
-type Preflight = { openai?: { configured: boolean }; livekit?: { configured: boolean } };
+type Preflight = {
+  openai?: { configured: boolean };
+  livekit?: { configured: boolean };
+  translationProfiles?: TranslationProfileInfo[];
+};
 const names = { en: 'English', ru: 'Russian', es: 'Spanish', uk: 'Ukrainian' };
 
 export function ManagedOperator({ initialLease, requestAccess }: ManagedOperatorOptions) {
@@ -31,6 +39,7 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
   const [busy, setBusy] = useState(false);
   const [source, setSource] = useState<'en' | 'ru'>('en');
   const [speech, setSpeech] = useState(false);
+  const [profileId, setProfileId] = useState<TranslationProfileId>('quality');
   const [captureRequested, setCaptureRequested] = useState(false);
   const [deviceId, setDeviceId] = useState<string>();
   const [captions, setCaptions] = useState<TranscriptSegment[]>([]);
@@ -155,6 +164,7 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
   async function start() {
     if (!locked) {
       await api.create(connection, {
+        translationProfile: profileId,
         sourceLanguage: source,
         targets: (['en', 'ru'] as const).map((language) => ({
           id: `channel-${language}`,
@@ -186,9 +196,14 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
     await api.start(connection);
   }
   const shownSource = locked && session ? session.sourceLanguage : source;
+  const selectedProfile = locked
+    ? session?.translationProfile
+    : preflight?.translationProfiles?.find((profile) => profile.id === profileId);
+  const profileReady =
+    locked && !session?.translationProfile ? preflight?.openai?.configured : selectedProfile?.ready;
   const translated =
     session?.targets.filter((channel) => channel.targetLanguage !== session.sourceLanguage) ?? [];
-  const speechEnabled = live
+  const speechEnabled = locked
     ? translated.some((channel) => channel.speechEnabled !== false)
     : speech;
   const toggleSpeech = (enabled: boolean) =>
@@ -234,6 +249,66 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
               <option value="ru">Russian → English</option>
             </select>
           </label>
+          <label>
+            Translation quality
+            <select
+              value={locked && !selectedProfile ? 'legacy' : (selectedProfile?.id ?? profileId)}
+              disabled={locked || busy}
+              onChange={(event) => setProfileId(event.target.value as TranslationProfileId)}
+            >
+              {locked && !selectedProfile && (
+                <option value="legacy">Existing server configuration</option>
+              )}
+              <option value="quality">Quality</option>
+              <option value="economy">Economy · shared-data allowance</option>
+            </select>
+          </label>
+          {selectedProfile && (
+            <div className="profile-details">
+              {!selectedProfile.ready && (
+                <p className="notice">{selectedProfile.unavailableReason}</p>
+              )}
+              {selectedProfile.id === 'economy' && (
+                <p className="hint">
+                  Uses a sharing project for spoken text. Eligible usage may be covered; audio and
+                  usage beyond the allowance can incur charges.
+                </p>
+              )}
+              <details>
+                <summary>Models and estimated charges</summary>
+                <p className="hint">
+                  Text: {selectedProfile.textModel} · Recognition:{' '}
+                  {selectedProfile.transcriptionModel}
+                </p>
+                <p className="hint">
+                  {selectedProfile.rates.textInputPerMillionUsd !== null &&
+                  selectedProfile.rates.textOutputPerMillionUsd !== null
+                    ? `Text list price: $${selectedProfile.rates.textInputPerMillionUsd} input / $${selectedProfile.rates.textOutputPerMillionUsd} output per million tokens.`
+                    : 'Check the configured text model’s current price in OpenAI settings.'}{' '}
+                  {selectedProfile.rates.transcriptionPerMinuteUsd !== null
+                    ? `Recognition: about $${(60 * selectedProfile.rates.transcriptionPerMinuteUsd).toFixed(2)} per hour.`
+                    : 'Recognition is billed separately.'}
+                </p>
+                {selectedProfile.id === 'economy' && (
+                  <p className="hint">
+                    Spoken text and translation context go to the configured sharing project.
+                    Private note attachments are excluded. OpenAI may cover eligible text usage;
+                    remaining allowance is unverified. Recognition and voice are additional charges.
+                    {selectedProfile.overagePolicy === 'allow-billed' &&
+                      ' Billed overage is allowed by server setup.'}
+                  </p>
+                )}
+                <p className="hint">
+                  Model access, translation quality, and live delay still need a mixer rehearsal.
+                </p>
+              </details>
+            </div>
+          )}
+          {!preflight?.translationProfiles && preflight && !locked && (
+            <p className="notice">
+              Update the translation processor to enable Quality and Economy.
+            </p>
+          )}
           <label className="toggle">
             <input
               type="checkbox"
@@ -252,20 +327,12 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
           {!preflight?.livekit?.configured && (
             <p className="hint">Audio relay setup is needed for translated speech.</p>
           )}
-          {preflight && !preflight.openai?.configured && (
-            <p className="notice">
-              Add the OpenAI key in server setup before starting live translation.
-            </p>
-          )}
           <div className="actions">
             {!live ? (
               <button
                 className="primary"
                 disabled={
-                  busy ||
-                  expired ||
-                  !preflight?.openai?.configured ||
-                  (locked && session?.state !== 'preflight')
+                  busy || expired || !profileReady || (locked && session?.state !== 'preflight')
                 }
                 onClick={() => void act(start)}
               >
@@ -302,8 +369,10 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
             </a>
           </div>
           <p className="hint">
-            This session uses the server’s configured cloud translation models. Translation and
-            voice usage may incur API charges.
+            {speechEnabled && selectedProfile
+              ? `Voice: ${selectedProfile.speechModel}, billed separately. `
+              : ''}
+            Prices are estimates, not a spending limit. Turn voice off to stop speech generation.
           </p>
         </section>
         <section className="card">

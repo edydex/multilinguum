@@ -6,6 +6,30 @@ export type SessionState = 'preflight' | 'starting' | 'live' | 'stopping' | 'com
 export type VoiceMode = 'source' | 'natural' | 'cloned';
 export type ProviderKind = 'openai-realtime' | 'openai-cascade' | 'local' | 'deterministic';
 
+export type TranslationProfileId = 'quality' | 'economy';
+
+/** Safe operator-facing configuration. Never include credentials or project identifiers. */
+export interface TranslationProfileInfo {
+  id: TranslationProfileId;
+  label: string;
+  ready: boolean;
+  unavailableReason?: string;
+  textModel: string;
+  reasoningEffort: 'none' | 'low';
+  transcriptionModel: string;
+  speechModel: string;
+  sharing: 'not-requested' | 'administrator-confirmed-text-project';
+  allowanceVerified: false;
+  overagePolicy: 'block' | 'allow-billed';
+  qualityValidated: false;
+  rates: {
+    checkedOn: string;
+    textInputPerMillionUsd: number | null;
+    textOutputPerMillionUsd: number | null;
+    transcriptionPerMinuteUsd: number | null;
+  };
+}
+
 export interface ProcessingNodeRef {
   id: string;
   name: string;
@@ -57,6 +81,9 @@ export interface ServiceSession {
   configurationLocked: boolean;
   budgetWarningUsd: number;
   estimatedCostUsd: number;
+  translationProfile?: TranslationProfileInfo;
+  /** Profile sessions report only the known recognition cost; text and voice are extra. */
+  costEstimateKind?: 'transcription-only';
 }
 
 export interface ConsentRecord {
@@ -259,6 +286,7 @@ export interface TranscriptManifest {
 }
 
 export interface ArchiveManifest {
+  translationProfile?: TranslationProfileInfo;
   version: 1;
   sessionId: string;
   createdAt: string;
