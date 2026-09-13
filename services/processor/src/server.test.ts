@@ -89,6 +89,34 @@ function sessionRequest() {
 }
 
 describe('processor vertical slice', () => {
+  it('cancels a prepared service without starting providers or creating an archive', async () => {
+    const server = await testServer();
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: sessionRequest(),
+    });
+    const stopped = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/stop',
+      headers: headers(),
+      payload: {},
+    });
+    expect(stopped.statusCode).toBe(200);
+    expect(stopped.json()).toMatchObject({ session: { state: 'completed' }, archive: null });
+    expect((await server.inject({ url: '/api/archives', headers: headers() })).json()).toEqual([]);
+    expect(
+      (
+        await server.inject({
+          method: 'POST',
+          url: '/api/maintenance',
+          headers: headers(),
+          payload: { enabled: true },
+        })
+      ).statusCode,
+    ).toBe(200);
+  });
   it('quiesces idle translation for backups and refuses maintenance during a service', async () => {
     const server = await testServer();
     const maintenance = (enabled: boolean) =>

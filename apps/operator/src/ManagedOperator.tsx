@@ -285,6 +285,18 @@ export function ManagedOperator({ initialLease, requestAccess }: ManagedOperator
                 {busy ? 'Stopping…' : 'Stop translation'}
               </button>
             )}
+            {session?.state === 'preflight' && (
+              <button
+                disabled={busy || expired}
+                onClick={() =>
+                  void act(async () => {
+                    await api.stop(connection);
+                  })
+                }
+              >
+                Cancel preparation
+              </button>
+            )}
             <a href="/translate" target="_blank" rel="noreferrer">
               Open congregation screen ↗
             </a>

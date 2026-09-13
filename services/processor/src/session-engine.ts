@@ -567,8 +567,13 @@ export class SessionEngine {
     return channel.health;
   }
 
-  async stop(): Promise<{ session: ServiceSession; archive: ArchiveManifest }> {
+  async stop(): Promise<{ session: ServiceSession; archive: ArchiveManifest | null }> {
     const session = this.#requiredSession();
+    if (session.state === 'preflight') {
+      this.#session = { ...session, state: 'completed', stoppedAt: new Date().toISOString() };
+      this.#emitSession();
+      return { session: this.#session, archive: null };
+    }
     if (!['live', 'failed'].includes(session.state)) throw new Error('Session is not active.');
     this.#session = { ...session, state: 'stopping' };
     this.#emitSession();
