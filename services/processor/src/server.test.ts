@@ -468,6 +468,158 @@ describe('processor vertical slice', () => {
     }
   });
 
+  it('allows a separate recording-review lease to read finalized archives but never control or delete', async () => {
+    vi.spyOn(DeterministicSpeechRenderer.prototype, 'render').mockImplementation(
+      async (segment) => ({
+        data: new Uint8Array(96000),
+        encoding: 'pcm_s16le',
+        sampleRate: 48000,
+        startMs: segment.sourceStartMs,
+        endMs: segment.sourceEndMs,
+        sequence: segment.sequence,
+        language: segment.language,
+        renderer: 'synthetic-silence',
+      }),
+    );
+    const server = await testServer();
+    const prepared = sessionRequest();
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: prepared,
+    });
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/start',
+      headers: headers(),
+      payload: {},
+    });
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/replay',
+      headers: headers(),
+      payload: {
+        segments: [
+          {
+            text: 'Private recorded sermon.',
+            sourceStartMs: 0,
+            sourceEndMs: 1000,
+            final: true,
+            sequence: 0,
+          },
+        ],
+      },
+    });
+    const stopped = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/stop',
+      headers: headers(),
+      payload: {},
+    });
+    expect(stopped.statusCode).toBe(200);
+    const id = stopped.json().archive.sessionId;
+    const minted = await server.inject({
+      method: 'POST',
+      url: '/api/control/leases',
+      headers: headers(),
+      payload: { subject: 'reader', scope: 'archive-read' },
+    });
+    expect(minted.statusCode).toBe(200);
+    const reviewHeaders = { ...headers(), authorization: `Bearer ${minted.json().token}` };
+    const readPaths = [
+      '/api/archives',
+      `/api/archives/${id}/transcripts/channel-en`,
+      `/api/archives/${id}/audio/channel-en`,
+      `/api/archives/${id}/latency`,
+    ];
+    for (const url of readPaths) {
+      const response = await server.inject({ url, headers: reviewHeaders });
+      expect(response.statusCode, url).toBe(200);
+      expect(response.headers['cache-control']).toContain('private, no-store');
+      for (const token of [
+        '',
+        issueControlLease('reader', controlToken).token,
+        issueControlLease('reader', controlToken, Date.now() - 600001, 'archive-read').token,
+        issueControlLease('reader', controlToken + 'other', Date.now(), 'archive-read').token,
+      ]) {
+        expect(
+          (await server.inject({ url, headers: { authorization: `Bearer ${token}` } })).statusCode,
+          url,
+        ).toBe(401);
+      }
+    }
+    for (const url of [
+      '/api/preflight',
+      '/api/sessions/current',
+      '/api/context-documents',
+      '/api/voice-profiles',
+    ]) {
+      expect((await server.inject({ url, headers: reviewHeaders })).statusCode, url).toBe(401);
+    }
+    for (const url of [
+      '/api/sessions',
+      '/api/sessions/current/start',
+      '/api/sessions/current/stop',
+      '/api/sessions/current/channels/channel-en',
+      '/api/context-documents',
+      '/api/control/leases',
+      `/api/archives/${id}/retain`,
+    ]) {
+      expect(
+        (await server.inject({ method: 'POST', url, headers: reviewHeaders, payload: {} }))
+          .statusCode,
+        url,
+      ).toBe(401);
+    }
+    expect(
+      (
+        await server.inject({
+          method: 'DELETE',
+          url: `/api/archives/${id}`,
+          headers: { authorization: reviewHeaders.authorization },
+        })
+      ).statusCode,
+    ).toBe(401);
+    const next = await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: prepared,
+    });
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/start',
+      headers: headers(),
+      payload: {},
+    });
+    for (const url of ['/api/operator/events', `/api/capture/audio?sessionId=${next.json().id}`]) {
+      const socket = await server.injectWS(url, {
+        headers: { 'sec-websocket-protocol': `multilinguum-auth.${minted.json().token}` },
+      });
+      try {
+        expect((await once(socket, 'close'))[0]).toBe(1008);
+      } finally {
+        socket.terminate();
+      }
+    }
+    expect(
+      (await server.inject({ url: '/api/sessions/current', headers: headers() })).json().session
+        .state,
+    ).toBe('live');
+    expect(
+      (await server.inject({ url: '/api/archives', headers: headers() }))
+        .json()
+        .some((item: { sessionId: string }) => item.sessionId === id),
+    ).toBe(true);
+    await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/stop',
+      headers: headers(),
+      payload: {},
+    });
+  });
+
   it('limits Community leases to live control and serializes concurrent service creation', async () => {
     const server = await testServer();
     const minted = await server.inject({

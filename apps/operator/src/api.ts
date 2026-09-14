@@ -42,8 +42,14 @@ async function request<T>(
   return (await response.json()) as T;
 }
 
-async function requestBlob(connection: OperatorConnection, path: string): Promise<Blob> {
+async function requestBlob(
+  connection: OperatorConnection,
+  path: string,
+  signal?: AbortSignal,
+): Promise<Blob> {
   const response = await fetch(operatorUrl(path, connection.baseUrl), {
+    ...(signal ? { signal } : {}),
+    cache: 'no-store',
     headers: { authorization: `Bearer ${connection.token}` },
   });
   if (!response.ok) {
@@ -130,14 +136,32 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  archives: (connection: OperatorConnection) =>
-    request<ArchiveManifest[]>(connection, '/api/archives'),
-  archiveAudio: (connection: OperatorConnection, sessionId: string, channelId: string) =>
-    requestBlob(connection, `/api/archives/${sessionId}/audio/${channelId}`),
-  archiveTranscript: (connection: OperatorConnection, sessionId: string, channelId: string) =>
-    requestBlob(connection, `/api/archives/${sessionId}/transcripts/${channelId}`),
-  archiveLatency: (connection: OperatorConnection, sessionId: string) =>
-    requestBlob(connection, `/api/archives/${sessionId}/latency`),
+  archives: (connection: OperatorConnection, signal?: AbortSignal) =>
+    request<ArchiveManifest[]>(connection, '/api/archives', signal ? { signal } : undefined),
+  archiveAudio: (
+    connection: OperatorConnection,
+    sessionId: string,
+    channelId: string,
+    signal?: AbortSignal,
+  ) =>
+    requestBlob(
+      connection,
+      `/api/archives/${encodeURIComponent(sessionId)}/audio/${encodeURIComponent(channelId)}`,
+      signal,
+    ),
+  archiveTranscript: (
+    connection: OperatorConnection,
+    sessionId: string,
+    channelId: string,
+    signal?: AbortSignal,
+  ) =>
+    requestBlob(
+      connection,
+      `/api/archives/${encodeURIComponent(sessionId)}/transcripts/${encodeURIComponent(channelId)}`,
+      signal,
+    ),
+  archiveLatency: (connection: OperatorConnection, sessionId: string, signal?: AbortSignal) =>
+    requestBlob(connection, `/api/archives/${encodeURIComponent(sessionId)}/latency`, signal),
   retain: (connection: OperatorConnection, sessionId: string, retained: boolean) =>
     request<ArchiveManifest>(connection, `/api/archives/${sessionId}/retain`, {
       method: 'POST',

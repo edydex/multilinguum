@@ -16,6 +16,7 @@ import { api, operatorUrl, subscribe } from './api';
 import { useAudioMeter } from './useAudioMeter';
 import { useAudioStreamer } from './useAudioStreamer';
 import { dbToMeterPercent, signalStatus } from './audioLevel';
+import { ManagedArchives } from './ManagedArchives';
 import { ServiceUsagePanel } from './ServiceUsagePanel';
 
 export interface ControlLease {
@@ -26,6 +27,7 @@ export interface ControlLease {
 export interface ManagedOperatorOptions extends ServicePlanOptions {
   initialLease: ControlLease;
   requestAccess(): Promise<ControlLease>;
+  requestArchiveAccess?(): Promise<ControlLease>;
 }
 type Snapshot = Awaited<ReturnType<typeof api.current>>;
 type Preflight = {
@@ -37,6 +39,7 @@ const names = { en: 'English', ru: 'Russian', es: 'Spanish', uk: 'Ukrainian' };
 export function ManagedOperator({
   initialLease,
   requestAccess,
+  requestArchiveAccess,
   loadServicePlans,
   saveServicePlan,
   preferredServiceId,
@@ -823,6 +826,7 @@ export function ManagedOperator({
           ))}
         </div>
       </section>
+      {requestArchiveAccess && <ManagedArchives requestAccess={requestArchiveAccess} />}
     </main>
   );
 }

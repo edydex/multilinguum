@@ -3,16 +3,17 @@ import type { RawData, WebSocket } from 'ws';
 
 const lifetimeMs = 10 * 60 * 1000;
 const prefix = 'mlg1';
+export type LeaseScope = 'session-control' | 'archive-read';
 export interface ControlAccess {
   subject: string;
   expiresAtUnixMs: number;
-  scope: 'master' | 'session-control';
+  scope: 'master' | LeaseScope;
 }
 interface Claims {
   subject: string;
   issuedAtUnixMs: number;
   expiresAtUnixMs: number;
-  scope: 'session-control';
+  scope: LeaseScope;
   audience: 'multilinguum-control-v1';
   id: string;
 }
@@ -24,14 +25,24 @@ function equal(left: string, right: string): boolean {
 function sign(payload: string, secret: string): string {
   return createHmac('sha256', secret).update(`${prefix}.${payload}`).digest('base64url');
 }
-export function issueControlLease(subject: string, secret: string, now = Date.now()) {
-  if (!subject || subject.length > 128 || secret.length < 32)
+export function issueControlLease(
+  subject: string,
+  secret: string,
+  now = Date.now(),
+  scope: LeaseScope = 'session-control',
+) {
+  if (
+    !subject ||
+    subject.length > 128 ||
+    secret.length < 32 ||
+    !['session-control', 'archive-read'].includes(scope)
+  )
     throw new Error('Invalid lease configuration');
   const claims: Claims = {
     subject,
     issuedAtUnixMs: now,
     expiresAtUnixMs: now + lifetimeMs,
-    scope: 'session-control',
+    scope,
     audience: 'multilinguum-control-v1',
     id: randomUUID(),
   };
@@ -62,7 +73,7 @@ export function readControlAccess(
     const claims = JSON.parse(Buffer.from(payload, 'base64url').toString()) as Claims;
     if (
       claims.audience !== 'multilinguum-control-v1' ||
-      claims.scope !== 'session-control' ||
+      !['session-control', 'archive-read'].includes(claims.scope) ||
       typeof claims.subject !== 'string' ||
       !claims.subject ||
       claims.subject.length > 128 ||

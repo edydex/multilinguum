@@ -20,12 +20,18 @@ import {
 
 interface ArchiveReviewProps {
   archive: ArchiveManifest;
-  connection: OperatorConnection;
+  connection?: OperatorConnection;
+  requestConnection?: () => Promise<OperatorConnection>;
   onClose: () => void;
   onError: (message: string) => void;
 }
 
-const reviewLanguages: Language[] = ['en', 'ru'];
+const languageNames: Record<Language, string> = {
+  en: 'English',
+  ru: 'Russian',
+  es: 'Spanish',
+  uk: 'Ukrainian',
+};
 
 function formatTime(milliseconds: number): string {
   const totalSeconds = Math.max(0, Math.floor(milliseconds / 1_000));
@@ -39,7 +45,13 @@ function words(segment: ReviewSegment): string[] {
   return segment.text.trim().split(/\s+/).filter(Boolean);
 }
 
-export function ArchiveReview({ archive, connection, onClose, onError }: ArchiveReviewProps) {
+export function ArchiveReview({
+  archive,
+  connection,
+  requestConnection,
+  onClose,
+  onError,
+}: ArchiveReviewProps) {
   const [tracks, setTracks] = useState<Partial<Record<Language, ReviewTrack>>>({});
   const [language, setLanguage] = useState<Language>('en');
   const [loading, setLoading] = useState(true);
@@ -47,41 +59,71 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
   const audioRef = useRef<HTMLAudioElement>(null);
   const pendingSeek = useRef<{ audioMs: number; play: boolean } | undefined>(undefined);
 
+  const currentConnection = useRef(connection);
+  currentConnection.current = connection;
+  const currentError = useRef(onError);
+  currentError.current = onError;
+
   useEffect(() => {
     let cancelled = false;
     const urls: string[] = [];
+    const controller = new AbortController();
     const load = async () => {
       setLoading(true);
+      setTracks({});
       try {
+        const authorized = requestConnection
+          ? await requestConnection()
+          : currentConnection.current;
+        if (!authorized) throw new Error('Connect to the recording server to review this service.');
+        if (cancelled) return;
         const latency = archive.latencyReport.sha256
           ? parseJsonLines<PipelineLatencySample>(
-              await (await api.archiveLatency(connection, archive.sessionId)).text(),
+              await (
+                await api.archiveLatency(authorized, archive.sessionId, controller.signal)
+              ).text(),
             )
           : [];
         const loaded = await Promise.all(
-          reviewLanguages.map(async (nextLanguage) => {
-            const audioTrack = archive.audioTracks.find(
-              (track) => track.language === nextLanguage && track.sha256,
-            );
-            const transcriptTrack = archive.transcripts.find(
-              (track) => track.language === nextLanguage && track.sha256,
-            );
-            if (!audioTrack || !transcriptTrack) return undefined;
-            const [audio, transcriptBlob] = await Promise.all([
-              api.archiveAudio(connection, archive.sessionId, audioTrack.channelId),
-              api.archiveTranscript(connection, archive.sessionId, transcriptTrack.channelId),
-            ]);
-            const audioUrl = URL.createObjectURL(audio);
-            urls.push(audioUrl);
-            return buildReviewTrack(
-              nextLanguage,
-              audioTrack.channelId,
-              audioUrl,
-              parseJsonLines<TranscriptSegment>(await transcriptBlob.text()),
-              latency,
-              archive.sourceLanguage,
-            );
-          }),
+          [...new Set(archive.transcripts.map((track) => track.language))].map(
+            async (nextLanguage) => {
+              const audioTrack = archive.audioTracks.find(
+                (track) => track.language === nextLanguage && track.sha256,
+              );
+              const transcriptTrack = archive.transcripts.find(
+                (track) => track.language === nextLanguage && track.sha256,
+              );
+              if (!transcriptTrack) return undefined;
+              const [audio, transcriptBlob] = await Promise.all([
+                audioTrack
+                  ? api.archiveAudio(
+                      authorized,
+                      archive.sessionId,
+                      audioTrack.channelId,
+                      controller.signal,
+                    )
+                  : undefined,
+                api.archiveTranscript(
+                  authorized,
+                  archive.sessionId,
+                  transcriptTrack.channelId,
+                  controller.signal,
+                ),
+              ]);
+              const transcript = parseJsonLines<TranscriptSegment>(await transcriptBlob.text());
+              if (cancelled || controller.signal.aborted) return undefined;
+              const audioUrl = audio ? URL.createObjectURL(audio) : undefined;
+              if (audioUrl) urls.push(audioUrl);
+              return buildReviewTrack(
+                nextLanguage,
+                transcriptTrack.channelId,
+                audioUrl,
+                transcript,
+                latency,
+                archive.sourceLanguage,
+              );
+            },
+          ),
         );
         if (cancelled) return;
         const nextTracks = Object.fromEntries(
@@ -90,10 +132,17 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
             .map((track) => [track.language, track]),
         ) as Partial<Record<Language, ReviewTrack>>;
         setTracks(nextTracks);
-        setLanguage(nextTracks.en ? 'en' : archive.sourceLanguage);
+        setLanguage(
+          nextTracks[archive.sourceLanguage]
+            ? archive.sourceLanguage
+            : (loaded.find((track) => track)?.language ?? archive.sourceLanguage),
+        );
         setAudioMs(0);
       } catch (cause) {
-        if (!cancelled) onError(cause instanceof Error ? cause.message : String(cause));
+        controller.abort();
+        for (const url of urls) URL.revokeObjectURL(url);
+        if (!cancelled)
+          currentError.current(cause instanceof Error ? cause.message : String(cause));
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -101,13 +150,14 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
     void load();
     return () => {
       cancelled = true;
+      controller.abort();
       for (const url of urls) URL.revokeObjectURL(url);
     };
-  }, [archive, connection, onError]);
+  }, [archive, connection?.baseUrl, requestConnection]);
 
   const activeTrack = tracks[language];
   const activeSegment = useMemo(() => {
-    if (!activeTrack) return undefined;
+    if (!activeTrack?.audioUrl) return undefined;
     return (
       activeTrack.segments.find(
         (segment) => audioMs >= segment.audioStartMs && audioMs < segment.audioEndMs,
@@ -131,11 +181,19 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
     const nextTrack = tracks[nextLanguage];
     const audio = audioRef.current;
     if (!currentTrack || !nextTrack || nextLanguage === language) return;
-    const semanticPosition = sourceTimeAtAudio(currentTrack, (audio?.currentTime ?? 0) * 1_000);
-    pendingSeek.current = {
-      audioMs: audioTimeAtSource(nextTrack, semanticPosition),
-      play: Boolean(audio && !audio.paused),
-    };
+    const semanticPosition = sourceTimeAtAudio(
+      currentTrack,
+      audio ? audio.currentTime * 1_000 : audioMs,
+    );
+    const nextAudioMs = audioTimeAtSource(nextTrack, semanticPosition);
+    pendingSeek.current = nextTrack.audioUrl
+      ? {
+          audioMs: nextAudioMs,
+          play: Boolean(audio && !audio.paused),
+        }
+      : undefined;
+    audio?.pause();
+    setAudioMs(nextAudioMs);
     setLanguage(nextLanguage);
   };
 
@@ -156,7 +214,12 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
   if (loading) {
     return (
       <section className="panel review-page">
-        <div className="empty">Preparing bilingual review…</div>
+        <button className="review-back" onClick={onClose}>
+          ← Recorded services
+        </button>
+        <div className="empty" role="status">
+          Preparing recorded service…
+        </div>
       </section>
     );
   }
@@ -168,7 +231,7 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
           ← Recorded services
         </button>
         <div className="empty">
-          This archive does not have reviewable English and Russian tracks.
+          This recording does not contain a finalized transcript to review.
         </div>
         {archive.usage && <ServiceUsagePanel usage={archive.usage} />}
       </section>
@@ -182,10 +245,12 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
           <button className="review-back" onClick={onClose}>
             ← Recorded services
           </button>
-          <p className="eyebrow">BILINGUAL ARCHIVE REVIEW</p>
-          <h2>{new Date(archive.createdAt).toLocaleString()}</h2>
+          <p className="eyebrow">RECORDED SERVICE REVIEW</p>
+          <h2>{archive.serviceReference?.title || new Date(archive.createdAt).toLocaleString()}</h2>
           <p>
-            Click any word to hear that moment. Language switching keeps the same sermon thought.
+            {activeTrack.audioUrl
+              ? 'Click a word to hear that moment. Language switching keeps the same sermon thought.'
+              : 'Read the finalized transcript below. No audio was recorded for this language.'}
           </p>
         </div>
         <div className="review-position">
@@ -201,45 +266,45 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
       {archive.usage && <ServiceUsagePanel usage={archive.usage} />}
       <div className="review-controls">
         <div className="review-language" role="group" aria-label="Review language">
-          <button
-            className={language === 'en' ? 'active' : ''}
-            disabled={!tracks.en}
-            onClick={() => switchLanguage('en')}
-          >
-            <span>EN</span> English translation
-          </button>
-          <button
-            className={language === 'ru' ? 'active' : ''}
-            disabled={!tracks.ru}
-            onClick={() => switchLanguage('ru')}
-          >
-            <span>RU</span> Russian original
-          </button>
+          {(Object.keys(tracks) as Language[]).map((value) => (
+            <button
+              key={value}
+              className={language === value ? 'active' : ''}
+              onClick={() => switchLanguage(value)}
+            >
+              <span>{value.toUpperCase()}</span> {languageNames[value]}{' '}
+              {value === archive.sourceLanguage ? 'original' : 'translation'}
+            </button>
+          ))}
         </div>
-        <audio
-          key={activeTrack.audioUrl}
-          ref={audioRef}
-          controls
-          src={activeTrack.audioUrl}
-          onLoadedMetadata={applyPendingSeek}
-          onTimeUpdate={(event) => setAudioMs(event.currentTarget.currentTime * 1_000)}
-          onSeeked={(event) => setAudioMs(event.currentTarget.currentTime * 1_000)}
-        />
+        {activeTrack.audioUrl && (
+          <audio
+            key={activeTrack.audioUrl}
+            ref={audioRef}
+            controls
+            src={activeTrack.audioUrl}
+            onLoadedMetadata={applyPendingSeek}
+            onTimeUpdate={(event) => setAudioMs(event.currentTarget.currentTime * 1_000)}
+            onSeeked={(event) => setAudioMs(event.currentTarget.currentTime * 1_000)}
+          />
+        )}
         <div className="review-clock">
           <strong>{formatTime(audioMs)}</strong>
           <span>/ {formatTime(activeTrack.durationMs)}</span>
         </div>
       </div>
 
-      <div className="review-key">
-        <span>
-          <i className="current" /> currently spoken
-        </span>
-        <span>
-          <i /> click a word to seek
-        </span>
-        <span>Word timing is estimated within each finalized phrase.</span>
-      </div>
+      {activeTrack.audioUrl && (
+        <div className="review-key">
+          <span>
+            <i className="current" /> currently spoken
+          </span>
+          <span>
+            <i /> click a word to seek
+          </span>
+          <span>Word timing is estimated within each finalized phrase.</span>
+        </div>
+      )}
 
       <div className="review-transcript" aria-label={`${language.toUpperCase()} transcript`}>
         {activeTrack.segments.map((segment) => {
@@ -251,19 +316,25 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
               className={`review-line ${isActive ? 'active' : ''}`}
               key={`${segment.channelId}-${segment.sequence}`}
             >
-              <button className="review-time" onClick={() => seek(segment)}>
-                {formatTime(segment.audioStartMs)}
-              </button>
+              {activeTrack.audioUrl ? (
+                <button className="review-time" onClick={() => seek(segment)}>
+                  {formatTime(segment.audioStartMs)}
+                </button>
+              ) : (
+                <span className="review-time">{formatTime(segment.sourceStartMs)}</span>
+              )}
               <p>
-                {tokens.map((token, index) => (
-                  <button
-                    className={`review-word ${currentWord === index ? 'current' : ''}`}
-                    key={`${segment.sequence}-${index}`}
-                    onClick={() => seek(segment, index, tokens.length)}
-                  >
-                    {token}
-                  </button>
-                ))}
+                {activeTrack.audioUrl
+                  ? tokens.map((token, index) => (
+                      <button
+                        className={`review-word ${currentWord === index ? 'current' : ''}`}
+                        key={`${segment.sequence}-${index}`}
+                        onClick={() => seek(segment, index, tokens.length)}
+                      >
+                        {token}
+                      </button>
+                    ))
+                  : segment.text}
               </p>
               <span className="review-source-time">source {formatTime(segment.sourceStartMs)}</span>
             </article>

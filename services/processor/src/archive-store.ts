@@ -72,6 +72,9 @@ export class FileArchiveStore implements ArchiveStore {
     const manifest: ArchiveManifest = {
       version: 1,
       sessionId: session.id,
+      ...(session.serviceReference
+        ? { serviceReference: structuredClone(session.serviceReference) }
+        : {}),
       createdAt: session.createdAt,
       sourceLanguage: session.sourceLanguage,
       engineVersions,

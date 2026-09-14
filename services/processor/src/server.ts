@@ -266,18 +266,30 @@ export async function buildServer(config: ProcessorConfig) {
     reply.header('cache-control', 'private, no-store');
     const authorization = request.headers.authorization ?? '';
     const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
-    if (!readControlAccess(token, config.PROCESSOR_CONTROL_TOKEN))
+    const access = readControlAccess(token, config.PROCESSOR_CONTROL_TOKEN);
+    if (!access || !['master', 'session-control'].includes(access.scope))
       return reply.code(401).send({ error: 'Control access expired or unauthorized' });
     if (maintenance && request.method !== 'GET')
       return reply.code(503).send({ error: 'Translation maintenance is in progress' });
   };
+  const requireArchiveRead = async (request: FastifyRequest, reply: FastifyReply) => {
+    reply.header('cache-control', 'private, no-store').header('vary', 'Authorization');
+    const authorization = request.headers.authorization ?? '';
+    const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const access = readControlAccess(token, config.PROCESSOR_CONTROL_TOKEN);
+    if (!access || !['master', 'archive-read'].includes(access.scope))
+      return reply.code(401).send({ error: 'Recorded-service access expired or unauthorized' });
+  };
   app.post('/api/control/leases', { preHandler: requireControl }, async (request, reply) => {
-    const { subject } = z
-      .object({ subject: z.string().min(1).max(128) })
+    const { subject, scope } = z
+      .object({
+        subject: z.string().min(1).max(128),
+        scope: z.enum(['session-control', 'archive-read']).default('session-control'),
+      })
       .strict()
       .parse(request.body);
     reply.header('cache-control', 'private, no-store');
-    return issueControlLease(subject, config.PROCESSOR_CONTROL_TOKEN);
+    return issueControlLease(subject, config.PROCESSOR_CONTROL_TOKEN, Date.now(), scope);
   });
 
   app.setErrorHandler((error, _request, reply) => {
@@ -428,7 +440,7 @@ export async function buildServer(config: ProcessorConfig) {
   app.get('/api/operator/events', { websocket: true }, (socket, request) => {
     const token = webSocketControlToken(request);
     const access = readControlAccess(token, config.PROCESSOR_CONTROL_TOKEN);
-    if (!access) {
+    if (!access || !['master', 'session-control'].includes(access.scope)) {
       socket.close(1008, 'Unauthorized');
       return;
     }
@@ -458,7 +470,13 @@ export async function buildServer(config: ProcessorConfig) {
       config.PROCESSOR_CONTROL_TOKEN,
     );
     const session = engine.current();
-    if (!access || !session || session.id !== query.sessionId || session.state !== 'live') {
+    if (
+      !access ||
+      !['master', 'session-control'].includes(access.scope) ||
+      !session ||
+      session.id !== query.sessionId ||
+      session.state !== 'live'
+    ) {
       socket.close(1008, 'Unauthorized or inactive session');
       return;
     }
@@ -634,10 +652,10 @@ export async function buildServer(config: ProcessorConfig) {
     },
   );
 
-  app.get('/api/archives', { preHandler: requireControl }, async () => archive.list());
+  app.get('/api/archives', { preHandler: requireArchiveRead }, async () => archive.list());
   app.get(
     '/api/archives/:sessionId/audio/:channelId',
-    { preHandler: requireControl },
+    { preHandler: requireArchiveRead },
     async (request, reply) => {
       const { sessionId, channelId } = request.params as {
         sessionId: string;
@@ -652,7 +670,7 @@ export async function buildServer(config: ProcessorConfig) {
   );
   app.get(
     '/api/archives/:sessionId/transcripts/:channelId',
-    { preHandler: requireControl },
+    { preHandler: requireArchiveRead },
     async (request, reply) => {
       const { sessionId, channelId } = request.params as {
         sessionId: string;
@@ -667,7 +685,7 @@ export async function buildServer(config: ProcessorConfig) {
   );
   app.get(
     '/api/archives/:sessionId/latency',
-    { preHandler: requireControl },
+    { preHandler: requireArchiveRead },
     async (request, reply) => {
       const { sessionId } = request.params as { sessionId: string };
       const report = await archive.readLatency(sessionId);

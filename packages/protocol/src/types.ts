@@ -305,6 +305,7 @@ export interface TranscriptManifest {
 }
 
 export interface ArchiveManifest {
+  serviceReference?: ServiceReference;
   usage?: ServiceUsage;
   translationProfile?: TranslationProfileInfo;
   sermonNotes?: { documentIds: string[]; sharedWithEconomy: boolean };

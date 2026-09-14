@@ -18,7 +18,7 @@ export interface ReviewSegment extends ReviewTranscriptSegment {
 export interface ReviewTrack {
   language: Language;
   channelId: string;
-  audioUrl: string;
+  audioUrl: string | undefined;
   segments: ReviewSegment[];
   durationMs: number;
 }
@@ -34,7 +34,7 @@ export function parseJsonLines<T>(contents: string): T[] {
 export function buildReviewTrack(
   language: Language,
   channelId: string,
-  audioUrl: string,
+  audioUrl: string | undefined,
   transcript: ReviewTranscriptSegment[],
   latency: PipelineLatencySample[],
   sourceLanguage: Language,
@@ -49,7 +49,7 @@ export function buildReviewTrack(
   );
   let cursorMs = 0;
   const segments = ordered.map((segment) => {
-    if (language === sourceLanguage) {
+    if (language === sourceLanguage || !audioUrl) {
       return {
         ...segment,
         audioStartMs: segment.sourceStartMs,
@@ -74,7 +74,7 @@ export function buildReviewTrack(
     audioUrl,
     segments,
     durationMs:
-      language === sourceLanguage
+      language === sourceLanguage || !audioUrl
         ? Math.max(0, ...segments.map((segment) => segment.audioEndMs))
         : cursorMs,
   };

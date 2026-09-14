@@ -14,6 +14,21 @@ describe('short-lived Community control access', () => {
     expect(readControlAccess(`${token.slice(0, -1)}!`, secret, 10000)).toBeUndefined();
     expect(readControlAccess(secret, secret)?.scope).toBe('master');
   });
+  it('preserves recording scope and rejects renewing a live socket with it', () => {
+    const token = issueControlLease('same-manager', secret, Date.now(), 'archive-read').token;
+    expect(readControlAccess(token, secret)?.scope).toBe('archive-read');
+    const socket = Object.assign(new EventEmitter(), { close: vi.fn(), send: vi.fn() });
+    const live = issueControlLease('same-manager', secret);
+    const bound = bindSocketAccess(
+      socket as unknown as WebSocket,
+      readControlAccess(live.token, secret)!,
+      secret,
+    );
+    bound.consume(Buffer.from(JSON.stringify({ type: 'renew-auth', token })), false);
+    expect(bound.valid()).toBe(false);
+    expect(socket.close).toHaveBeenCalledWith(1008, expect.stringContaining('failed'));
+    socket.emit('close');
+  });
   it('renews the same operator without closing a live socket and expires without renewal', () => {
     vi.useFakeTimers();
     try {
