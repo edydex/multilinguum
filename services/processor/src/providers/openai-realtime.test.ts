@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type {
   AudioChunk,
   ChannelConfig,
@@ -121,6 +121,223 @@ function captureChunk(endMs = 1): AudioChunk {
 }
 
 describe('OpenAI Realtime provider adapters', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  it.each(['gpt-transcribe', 'gpt-live-transcribe'])(
+    'creates a supported transcription session for %s',
+    async (model) => {
+      const requests: Array<{
+        session: { audio: { input: { transcription: Record<string, unknown> } } };
+      }> = [];
+      vi.stubGlobal('fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        expect(request.url).toBe('https://api.openai.com/v1/realtime/client_secrets');
+        requests.push(await request.json());
+        return new Response(JSON.stringify({ value: 'fixture-ephemeral-secret' }), {
+          headers: { 'Content-Type': 'application/json' },
+        });
+      });
+      const connection = new FakeRealtimeConnection();
+      const transcriber = new OpenAILiveTranscriber('fixture-project-key', model, {
+        connectionFactory: () => connection,
+        stopDrainMs: 0,
+      });
+      await transcriber.start(session());
+      await transcriber.stop();
+      expect(requests).toHaveLength(1);
+      const transcription = requests[0]!.session.audio.input.transcription;
+      expect(transcription).toMatchObject({ model, languages: ['ru'] });
+      if (model === 'gpt-transcribe') expect(transcription).not.toHaveProperty('delay');
+      else expect(transcription.delay).toBe('low');
+    },
+  );
+
+  it('keeps committed audio order when later recognition finishes first', async () => {
+    const connection = new FakeRealtimeConnection();
+    const transcriber = new OpenAILiveTranscriber('fixture-key', 'gpt-transcribe', {
+      connectionFactory: () => connection,
+      secretProvider: { create: async () => 'fixture-ephemeral-secret' },
+      stopDrainMs: 0,
+      commitIntervalMs: 3_000,
+    });
+    const finals: TranscriptSegment[] = [];
+    transcriber.onSegment((segment) => {
+      if (segment.final) finals.push(segment);
+    });
+    await transcriber.start(session());
+    await transcriber.pushAudio(captureChunk(3_000));
+    connection.emit({ type: 'input_audio_buffer.committed', item_id: 'first' });
+    await transcriber.pushAudio(captureChunk(6_000));
+    connection.emit({
+      type: 'input_audio_buffer.committed',
+      item_id: 'second',
+      previous_item_id: 'first',
+    });
+    connection.emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'second',
+      transcript: 'Then the conclusion.',
+    });
+    expect(finals).toHaveLength(0);
+    connection.emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'first',
+      transcript: 'First the premise.',
+    });
+    expect(
+      finals.map(({ text, sequence, sourceStartMs, sourceEndMs }) => ({
+        text,
+        sequence,
+        sourceStartMs,
+        sourceEndMs,
+      })),
+    ).toEqual([
+      { text: 'First the premise.', sequence: 0, sourceStartMs: 0, sourceEndMs: 3_000 },
+      { text: 'Then the conclusion.', sequence: 1, sourceStartMs: 3_000, sourceEndMs: 6_000 },
+    ]);
+    await transcriber.stop();
+  });
+
+  it.each(['empty', 'failed'])(
+    'retires an %s turn without losing later text or replaying duplicates',
+    async (kind) => {
+      const connection = new FakeRealtimeConnection();
+      const transcriber = new OpenAILiveTranscriber('fixture-key', 'gpt-transcribe', {
+        connectionFactory: () => connection,
+        secretProvider: { create: async () => 'fixture-secret' },
+        stopDrainMs: 0,
+        commitIntervalMs: 3_000,
+      });
+      const finals: TranscriptSegment[] = [];
+      const errors: Error[] = [];
+      transcriber.onSegment((segment) => {
+        if (segment.final) finals.push(segment);
+      });
+      transcriber.onError((error) => errors.push(error));
+      await transcriber.start(session());
+      for (const [index, id] of ['first', 'second'].entries()) {
+        await transcriber.pushAudio(captureChunk((index + 1) * 3_000));
+        connection.emit({ type: 'input_audio_buffer.committed', item_id: id });
+      }
+      const later = {
+        type: 'conversation.item.input_audio_transcription.completed',
+        item_id: 'second',
+        transcript: 'The next sentence.',
+      };
+      connection.emit(later);
+      expect(finals).toHaveLength(0);
+      connection.emit(
+        kind === 'empty'
+          ? {
+              type: 'conversation.item.input_audio_transcription.completed',
+              item_id: 'first',
+              transcript: '',
+            }
+          : {
+              type: 'conversation.item.input_audio_transcription.failed',
+              item_id: 'first',
+              error: { message: 'Recognition failed.' },
+            },
+      );
+      connection.emit(later);
+      expect(finals).toHaveLength(1);
+      expect(finals[0]).toMatchObject({ sequence: 1, sourceStartMs: 3_000, sourceEndMs: 6_000 });
+      expect(errors).toHaveLength(kind === 'failed' ? 1 : 0);
+      await transcriber.stop();
+    },
+  );
+
+  it('retains early partial text timing when its audio is committed later', async () => {
+    const connection = new FakeRealtimeConnection();
+    const transcriber = new OpenAILiveTranscriber('fixture-key', 'gpt-live-transcribe', {
+      connectionFactory: () => connection,
+      secretProvider: { create: async () => 'fixture-secret' },
+      stopDrainMs: 0,
+    });
+    const segments: TranscriptSegment[] = [];
+    transcriber.onSegment((segment) => segments.push(segment));
+    await transcriber.start(session());
+    await transcriber.pushAudio(captureChunk(2_000));
+    connection.emit({
+      type: 'conversation.item.input_audio_transcription.delta',
+      item_id: 'early',
+      delta: 'Grace',
+    });
+    transcriber.flushAudio(360);
+    connection.emit({ type: 'input_audio_buffer.committed', item_id: 'early' });
+    connection.emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'early',
+      transcript: 'Grace and peace.',
+    });
+    expect(segments.at(-1)).toMatchObject({
+      final: true,
+      sequence: 0,
+      sourceStartMs: 0,
+      sourceEndMs: 2_000,
+      sourcePauseAfterMs: 360,
+    });
+    await transcriber.stop();
+  });
+
+  it('reports a missing turn and releases later text instead of stalling the rest of the service', async () => {
+    vi.useFakeTimers();
+    const connection = new FakeRealtimeConnection();
+    const transcriber = new OpenAILiveTranscriber('fixture-key', 'gpt-transcribe', {
+      connectionFactory: () => connection,
+      secretProvider: { create: async () => 'fixture-secret' },
+      stopDrainMs: 0,
+      commitIntervalMs: 3_000,
+    });
+    const finals: TranscriptSegment[] = [];
+    const errors: Error[] = [];
+    transcriber.onSegment((segment) => {
+      if (segment.final) finals.push(segment);
+    });
+    transcriber.onError((error) => errors.push(error));
+    await transcriber.start(session());
+    for (const [index, id] of ['missing', 'later'].entries()) {
+      await transcriber.pushAudio(captureChunk((index + 1) * 3_000));
+      connection.emit({ type: 'input_audio_buffer.committed', item_id: id });
+    }
+    connection.emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'later',
+      transcript: 'The next sentence.',
+    });
+    await vi.advanceTimersByTimeAsync(30_001);
+    expect(errors).toHaveLength(1);
+    expect(finals).toHaveLength(1);
+    expect(finals[0]).toMatchObject({ sequence: 1, text: 'The next sentence.' });
+    connection.emit({
+      type: 'conversation.item.input_audio_transcription.completed',
+      item_id: 'missing',
+      transcript: 'Stale late result.',
+    });
+    expect(finals).toHaveLength(1);
+    await transcriber.stop();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('lets committed-turn recognition wait past eight seconds for a natural pause', async () => {
+    const connection = new FakeRealtimeConnection();
+    const transcriber = new OpenAILiveTranscriber('fixture-key', 'gpt-transcribe', {
+      connectionFactory: () => connection,
+      secretProvider: { create: async () => 'fixture-secret' },
+      stopDrainMs: 0,
+    });
+    await transcriber.start(session());
+    await transcriber.pushAudio(captureChunk(8_000));
+    await transcriber.pushAudio(captureChunk(10_000));
+    expect(connection.sent).toHaveLength(2);
+    transcriber.flushAudio(360);
+    expect(connection.sent[2]).toEqual({ type: 'input_audio_buffer.commit' });
+    await transcriber.stop();
+  });
+
   it('normalizes explicitly committed live transcription windows into finalized segments', async () => {
     const connection = new FakeRealtimeConnection();
     const factory: RealtimeConnectionFactory = () => connection;
