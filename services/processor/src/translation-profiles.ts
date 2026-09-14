@@ -1,3 +1,4 @@
+import { recognitionRateUsd, usageRatesCheckedOn } from '@multilinguum/protocol';
 import type {
   TranslationProfileId,
   TranslationProfileInfo,
@@ -64,11 +65,10 @@ export function translationProfileInfo(
     overagePolicy: economy ? config.OPENAI_ECONOMY_OVERAGE_POLICY : 'allow-billed',
     qualityValidated: false,
     rates: {
-      checkedOn: '2026-09-13',
+      checkedOn: usageRatesCheckedOn,
       textInputPerMillionUsd: rates?.[0] ?? null,
       textOutputPerMillionUsd: rates?.[1] ?? null,
-      transcriptionPerMinuteUsd:
-        config.OPENAI_TRANSCRIBE_MODEL === 'gpt-live-transcribe' ? 0.017 : null,
+      transcriptionPerMinuteUsd: recognitionRateUsd(config.OPENAI_TRANSCRIBE_MODEL),
     },
   };
 }

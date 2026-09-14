@@ -134,6 +134,29 @@ input[type='checkbox'] {
 .profile-details p {
   overflow-wrap: anywhere;
 }
+.service-usage {
+  margin: 18px 0;
+  padding: 16px;
+  background: #f3f6f1;
+  border: 1px solid #dce4dd;
+  border-radius: 12px;
+}
+.service-usage h3 {
+  margin-bottom: 6px;
+}
+.service-usage summary {
+  cursor: pointer;
+  font-size: 14px;
+}
+.service-usage dt {
+  font-weight: 600;
+  margin-top: 12px;
+}
+.service-usage dd {
+  margin-left: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
 .notice {
   border: 1px solid #e8c88d;
   background: #fff8e8;

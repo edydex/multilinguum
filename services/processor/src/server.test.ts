@@ -277,8 +277,9 @@ describe('processor vertical slice', () => {
       expect(response.statusCode).toBe(200);
       expect(response.json()).toMatchObject({
         translationProfile: { id: 'economy' },
-        costEstimateKind: 'transcription-only',
-        estimatedCostUsd: 2.04,
+        costEstimateKind: 'observed-partial',
+        estimatedCostUsd: 0,
+        usage: { translationRequests: 0, speechRequests: 0, capturedAudioSeconds: 0 },
       });
       expect(requests).toHaveLength(0);
       expect(
@@ -322,6 +323,8 @@ describe('processor vertical slice', () => {
       const publicResponse = await server.inject({ url: '/api/public/service' });
       expect(publicResponse.body).not.toContain('translationProfile');
       expect(publicResponse.body).not.toContain('test-sharing-key');
+      expect(publicResponse.body).not.toContain('knownSubtotalUsd');
+      expect(publicResponse.body).not.toContain('inputTokens');
       expect(
         publicResponse
           .json()
@@ -334,6 +337,12 @@ describe('processor vertical slice', () => {
         payload: {},
       });
       expect(stopped.json().archive).toMatchObject({
+        usage: {
+          translationRequests: 1,
+          speechRequests: 0,
+          requestsWithoutPrice: 1,
+          incomplete: true,
+        },
         sermonNotes: {
           documentIds: shareNotes ? [note.json().id] : [],
           sharedWithEconomy: shareNotes,

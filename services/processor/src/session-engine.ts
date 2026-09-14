@@ -18,8 +18,13 @@ import type {
   TranslationProvider,
   TranslationProfileId,
   VoiceProfile,
+  ProviderUsage,
 } from '@multilinguum/protocol';
-import { createSessionSchema, estimateCloudServiceCost } from '@multilinguum/protocol';
+import {
+  createSessionSchema,
+  estimateCloudServiceCost,
+  ServiceUsageMeter,
+} from '@multilinguum/protocol';
 import { defaultGlossary } from './glossary.js';
 import { buildLatencyBreakdown, summarizeLatency } from './latency.js';
 import type { SermonContextStore } from './context-store.js';
@@ -69,6 +74,9 @@ export class SessionEngine {
   readonly #dependencies: SessionEngineDependencies;
   #session?: ServiceSession;
   #profile: ResolvedTranslationProfile | undefined;
+  #usageMeter: ServiceUsageMeter | undefined;
+  #usageClosed = false;
+  #usagePublishedAt = -Infinity;
   readonly #channels = new Map<string, RuntimeChannel>();
   readonly #sourceAudioSpans = new Map<number, LatencySpan>();
 
@@ -160,6 +168,7 @@ export class SessionEngine {
       }
     }
 
+    const usageMeter = profile ? new ServiceUsageMeter(profile.info.transcriptionModel) : undefined;
     const createdAt = new Date().toISOString();
     const id = randomUUID();
     const session: ServiceSession = {
@@ -180,16 +189,19 @@ export class SessionEngine {
       configurationLocked: false,
       budgetWarningUsd: parsed.budgetWarningUsd,
       estimatedCostUsd: profile
-        ? Number(
-            (
-              parsed.expectedDurationMinutes * (profile.info.rates.transcriptionPerMinuteUsd ?? 0)
-            ).toFixed(2),
-          )
+        ? 0
         : estimateCloudServiceCost(parsed.expectedDurationMinutes, targets),
-      ...(profile
-        ? { translationProfile: profile.info, costEstimateKind: 'transcription-only' as const }
+      ...(profile && usageMeter
+        ? {
+            translationProfile: profile.info,
+            costEstimateKind: 'observed-partial' as const,
+            usage: usageMeter.snapshot(),
+          }
         : {}),
     };
+    this.#usageMeter = usageMeter;
+    this.#usageClosed = false;
+    this.#usagePublishedAt = -Infinity;
     this.#profile = profile;
     this.#session = session;
     this.#channels.clear();
@@ -494,6 +506,10 @@ export class SessionEngine {
       (channel) => channel.config.voiceMode === 'source',
     );
     if (!sourceChannel) throw new Error('Session has no delayed source-audio channel.');
+    if (this.#usageMeter) {
+      this.#usageMeter.recordAudio(input.sequence, input.data.byteLength);
+      this.#publishUsage(false);
+    }
     const generation = sourceChannel.audioGeneration;
     const audio = {
       data: input.data,
@@ -632,7 +648,13 @@ export class SessionEngine {
     this.#emitSession();
     await this.drainAudio();
     await this.#dependencies.relay.closeSession(session.id);
-    const archive = await this.#dependencies.archive.finalize(session.id);
+    // Freeze one receipt for the completed service. Detached, cancelled requests
+    // still pending here remain explicitly unpriced in both views and the archive.
+    this.#publishUsage();
+    this.#usageClosed = true;
+    const archive = this.#usageMeter
+      ? await this.#dependencies.archive.finalize(session.id, this.#usageMeter.snapshot())
+      : await this.#dependencies.archive.finalize(session.id);
     this.#session = {
       ...this.#session,
       state: 'completed',
@@ -640,6 +662,34 @@ export class SessionEngine {
     };
     this.#emitSession();
     return { session: this.#session, archive };
+  }
+
+  #recordProviderUsage(sessionId: string, receipt: ProviderUsage): void {
+    if (
+      !this.#usageMeter ||
+      this.#usageClosed ||
+      this.#session?.id !== sessionId ||
+      this.#session.state === 'completed'
+    )
+      return;
+    this.#usageMeter.record(receipt);
+    this.#publishUsage();
+  }
+
+  #publishUsage(force = true): void {
+    if (!this.#session || !this.#usageMeter) return;
+    const now = performance.now();
+    if (!force && now - this.#usagePublishedAt < 1_000) return;
+    this.#usagePublishedAt = now;
+    const usage = this.#usageMeter.snapshot();
+    this.#session = { ...this.#session, usage, estimatedCostUsd: usage.knownSubtotalUsd };
+    this.#dependencies.broadcast({
+      type: 'cost',
+      estimatedCostUsd: usage.knownSubtotalUsd,
+      budgetWarning: usage.knownSubtotalUsd >= this.#session.budgetWarningUsd,
+      sessionId: this.#session.id,
+      usage,
+    });
   }
 
   async #processChannel(
@@ -662,6 +712,7 @@ export class SessionEngine {
         const translationStartedAtUnixMs = Date.now();
         try {
           translated = await this.#translationProvider(runtime.config).translate(source, {
+            recordUsage: (usage) => this.#recordProviderUsage(session.id, usage),
             sourceLanguage: session.sourceLanguage,
             targetLanguage: runtime.config.targetLanguage,
             glossary: defaultGlossary[runtime.config.targetLanguage],
@@ -834,6 +885,7 @@ export class SessionEngine {
     const renderStartedAtUnixMs = Date.now();
     const renderPromise = this.#render(input.runtime, input.translated, {
       playbackBacklogMs,
+      recordUsage: (usage) => this.#recordProviderUsage(session.id, usage),
       sourceDelivery: input.source.sourceDelivery,
       signal: input.runtime.speechAbort.signal,
     }).then(

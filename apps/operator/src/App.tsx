@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ServiceUsagePanel } from './ServiceUsagePanel';
 import { invoke } from '@tauri-apps/api/core';
 import { estimateCloudServiceCost } from '@multilinguum/protocol';
 import type {
@@ -280,6 +281,14 @@ export function App() {
           }));
         }
         if (event.type === 'error') setError(`${event.scope}: ${event.message}`);
+        if (event.type === 'cost' && event.usage) {
+          const usage = event.usage;
+          setSession((previous) =>
+            previous && previous.id === event.sessionId
+              ? { ...previous, usage, estimatedCostUsd: event.estimatedCostUsd }
+              : previous,
+          );
+        }
       },
       setConnected,
     );
@@ -513,6 +522,9 @@ export function App() {
       </aside>
 
       <main>
+        {tab === 'service' && session?.usage && (
+          <ServiceUsagePanel usage={session.usage} budgetWarningUsd={session.budgetWarningUsd} />
+        )}
         <header>
           <div>
             <p className="eyebrow">WORD OF TRUTH · LIVE INTERPRETATION</p>

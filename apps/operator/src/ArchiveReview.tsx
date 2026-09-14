@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { ServiceUsagePanel } from './ServiceUsagePanel';
 import type {
   ArchiveManifest,
   Language,
@@ -169,6 +170,7 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
         <div className="empty">
           This archive does not have reviewable English and Russian tracks.
         </div>
+        {archive.usage && <ServiceUsagePanel usage={archive.usage} />}
       </section>
     );
   }
@@ -196,6 +198,7 @@ export function ArchiveReview({ archive, connection, onClose, onError }: Archive
         </div>
       </div>
 
+      {archive.usage && <ServiceUsagePanel usage={archive.usage} />}
       <div className="review-controls">
         <div className="review-language" role="group" aria-label="Review language">
           <button

@@ -16,6 +16,7 @@ import { api, operatorUrl, subscribe } from './api';
 import { useAudioMeter } from './useAudioMeter';
 import { useAudioStreamer } from './useAudioStreamer';
 import { dbToMeterPercent, signalStatus } from './audioLevel';
+import { ServiceUsagePanel } from './ServiceUsagePanel';
 
 export interface ControlLease {
   token: string;
@@ -240,6 +241,21 @@ export function ManagedOperator({
         if (event.type === 'session')
           setSnapshot((previous) => ({ ...previous, session: event.session }));
         if (event.type === 'error') setError(event.message);
+        if (event.type === 'cost' && event.usage) {
+          const usage = event.usage;
+          setSnapshot((previous) =>
+            previous.session && previous.session.id === event.sessionId
+              ? {
+                  ...previous,
+                  session: {
+                    ...previous.session,
+                    usage,
+                    estimatedCostUsd: event.estimatedCostUsd,
+                  },
+                }
+              : previous,
+          );
+        }
       },
       setConnected,
     );
@@ -544,6 +560,9 @@ export function ManagedOperator({
             <p className="notice">
               Update the translation processor to enable Quality and Economy.
             </p>
+          )}
+          {session?.usage && (
+            <ServiceUsagePanel usage={session.usage} budgetWarningUsd={session.budgetWarningUsd} />
           )}
           {!locked && useNotes && profileId === 'economy' && !shareNotes && (
             <p className="hint">

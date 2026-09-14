@@ -1,3 +1,5 @@
+import type { ServiceUsage } from './usage.js';
+
 export const languages = ['en', 'ru', 'es', 'uk'] as const;
 export type Language = (typeof languages)[number];
 
@@ -94,9 +96,10 @@ export interface ServiceSession {
   configurationLocked: boolean;
   budgetWarningUsd: number;
   estimatedCostUsd: number;
+  usage?: ServiceUsage;
   translationProfile?: TranslationProfileInfo;
-  /** Profile sessions report only the known recognition cost; text and voice are extra. */
-  costEstimateKind?: 'transcription-only';
+  /** Older profiles expose a recognition-only forecast; new ones expose an explicitly partial live subtotal. */
+  costEstimateKind?: 'transcription-only' | 'observed-partial';
 }
 
 export interface ConsentRecord {
@@ -302,6 +305,7 @@ export interface TranscriptManifest {
 }
 
 export interface ArchiveManifest {
+  usage?: ServiceUsage;
   translationProfile?: TranslationProfileInfo;
   sermonNotes?: { documentIds: string[]; sharedWithEconomy: boolean };
   version: 1;
@@ -338,7 +342,13 @@ export type ProcessorEvent =
   | { type: 'health'; health: ChannelHealth }
   | { type: 'transcript'; segment: TranscriptSegment }
   | { type: 'latency'; sample: PipelineLatencySample }
-  | { type: 'cost'; estimatedCostUsd: number; budgetWarning: boolean }
+  | {
+      type: 'cost';
+      estimatedCostUsd: number;
+      budgetWarning: boolean;
+      sessionId?: string;
+      usage?: ServiceUsage;
+    }
   | { type: 'error'; scope: string; message: string };
 
 /** Public metadata only. PCM and private session configuration never enter events. */

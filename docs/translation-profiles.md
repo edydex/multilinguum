@@ -35,7 +35,15 @@ Economy sends spoken text, recent translated context, following spoken-text prev
 
 The server keeps uploaded documents locally and sends retrieved excerpts only when their selected service translates speech. The sharing choice and selected document IDs are retained in the private archive metadata. Filenames and note content are not published to congregation endpoints. Personal Heritage notes and account records are not part of this input. Responses use `store: false`; this does not override a project's sharing settings. Relevant context can help terminology and Scripture matching, but actual improvement needs a bilingual evaluation; the prompt forbids adding unspoken material or following instructions inside the notes. More context consumes input tokens.
 
-Recognition and generated voice use the separate audio key and may incur charges even if text usage receives an allowance. The operator shows the actual models and published rates in an expandable details panel. For profile sessions, `estimatedCostUsd` is only the known recognition estimate and `costEstimateKind` is `transcription-only`; text tokens and optional voice are additional. Unknown custom-model rates are shown as unknown.
+Recognition and generated voice use the separate audio key and may incur charges even if text usage receives an allowance. The operator shows the actual models and published rates in an expandable details panel.
+
+Profile sessions now show **Service usage** in both operator entry points and the private archive review. It measures captured audio, provider-reported text tokens, speech attempts and received speech duration. The known subtotal combines an estimate from captured recognition duration and priced text responses. This is the service's list-price estimate, not an account invoice, complimentary-allowance meter, or spending cap. The existing $20 reminder does not stop a service.
+
+Text pricing requires a recognized model, the reported standard (`default`) service tier, and complete nonnegative input, output, cached-read and cache-write counts. It includes cache-write and long-context multipliers. Missing fields, custom models, other tiers, failed and pending requests stay unpriced. PCM speech responses do not supply token usage; generated duration is shown without inventing a voice price. Unpriced work makes the subtotal explicitly partial. Recognition uses captured duration, which may differ from provider-billed processing.
+
+For these sessions, `estimatedCostUsd` is the observed known subtotal and `costEstimateKind` is `observed-partial`. Older archives may retain the earlier `transcription-only` forecast. `usage` is private operator/archive data and never enters public captions or listener events. Audio accounting publishes at most once a second, with immediate provider receipts and a final flush at stop. A completed archive freezes one receipt; detached cancelled requests still unresolved at finalization remain unpriced, and cannot alter the next service.
+
+Both text and speech SDK clients disable automatic retries. Text requests time out after 30 seconds; speech requests after 60 seconds. These request bounds and usage reminders do not guarantee a maximum invoice. The dated rate table is in `packages/protocol/src/usage.ts` and must be reviewed when adding or changing models.
 
 ## Model evidence and acceptance
 

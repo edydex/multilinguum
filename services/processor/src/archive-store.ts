@@ -1,3 +1,4 @@
+import type { ServiceUsage } from '@multilinguum/protocol';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
@@ -166,7 +167,7 @@ export class FileArchiveStore implements ArchiveStore {
     );
   }
 
-  async finalize(sessionId: string): Promise<ArchiveManifest> {
+  async finalize(sessionId: string, usage?: ServiceUsage): Promise<ArchiveManifest> {
     const manifest = await this.#readManifest(sessionId);
     await Promise.all(
       manifest.audioTracks.map(async (track) => {
@@ -260,6 +261,7 @@ export class FileArchiveStore implements ArchiveStore {
     const completedAt = new Date().toISOString();
     const integrityPayload = JSON.stringify({
       ...manifest,
+      ...(usage ? { usage } : {}),
       audioTracks,
       transcripts,
       latencyReport,
@@ -267,6 +269,7 @@ export class FileArchiveStore implements ArchiveStore {
     });
     const finalized: ArchiveManifest = {
       ...manifest,
+      ...(usage ? { usage } : {}),
       audioTracks,
       transcripts,
       latencyReport,

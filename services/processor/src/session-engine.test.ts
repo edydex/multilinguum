@@ -9,8 +9,11 @@ import type {
   SpeechRenderContext,
   TranscriptSegment,
   TranslationProvider,
+  ProcessorEvent,
 } from '@multilinguum/protocol';
 import { SessionEngine } from './session-engine.js';
+import { loadConfig } from './config.js';
+import { translationProfileInfo } from './translation-profiles.js';
 
 function manifest(session: ServiceSession): ArchiveManifest {
   return {
@@ -34,6 +37,7 @@ class DeferredSpeech implements SpeechRenderer {
     resolve: (audio: RenderedSpeech) => void;
     reject: (error: Error) => void;
     signal: AbortSignal | undefined;
+    recordUsage: SpeechRenderContext['recordUsage'];
   }> = [];
 
   render(
@@ -41,14 +45,33 @@ class DeferredSpeech implements SpeechRenderer {
     _profile?: never,
     context?: SpeechRenderContext,
   ): Promise<RenderedSpeech> {
+    context?.recordUsage?.({
+      requestId: `speech-${segment.id}`,
+      kind: 'speech',
+      model: 'gpt-4o-mini-tts',
+      status: 'started',
+    });
     return new Promise((resolve, reject) =>
-      this.pending.push({ segment, resolve, reject, signal: context?.signal }),
+      this.pending.push({
+        segment,
+        resolve,
+        reject,
+        signal: context?.signal,
+        recordUsage: context?.recordUsage,
+      }),
     );
   }
 
   resolve(sequence: number): void {
     const pending = this.pending.find((item) => item.segment.sequence === sequence);
     if (!pending) throw new Error(`No pending render for ${sequence}.`);
+    pending.recordUsage?.({
+      requestId: `speech-${pending.segment.id}`,
+      kind: 'speech',
+      model: 'gpt-4o-mini-tts',
+      status: 'completed',
+      generatedAudioSeconds: 0.01,
+    });
     pending.resolve({
       data: new Uint8Array(960),
       encoding: 'pcm_s16le',
@@ -70,7 +93,9 @@ async function fixture(
   source: 'en' | 'ru' = 'ru',
   speechEnabled = true,
   recording: { source?: boolean; translations?: boolean; realtime?: boolean } = {},
+  usageModel?: string,
 ) {
+  const events: ProcessorEvent[] = [];
   const captions: TranscriptSegment[] = [];
   const audio: RenderedSpeech[] = [];
   const recordedAudio: Array<{ channelId: string; audio: RenderedSpeech }> = [];
@@ -98,13 +123,30 @@ async function fixture(
   };
   const translation: TranslationProvider = {
     name: 'test-translation',
-    translate: async (segment, context) => ({
-      ...segment,
-      id: `${segment.id}-${context.targetLanguage}`,
-      language: context.targetLanguage,
-      text: `Translated ${segment.sequence}`,
-    }),
+    translate: async (segment, context) => {
+      context.recordUsage?.({
+        requestId: `${segment.id}-${context.targetLanguage}`,
+        kind: 'translation',
+        model: 'gpt-6-astra',
+        status: 'completed',
+        serviceTier: 'default',
+        inputTokens: 1_000,
+        cachedInputTokens: 0,
+        cacheWriteInputTokens: 0,
+        outputTokens: 100,
+      });
+      return {
+        ...segment,
+        id: `${segment.id}-${context.targetLanguage}`,
+        language: context.targetLanguage,
+        text: `Translated ${segment.sequence}`,
+      };
+    },
   };
+  const finalize = vi.fn(async (_id: string, usage?: ServiceSession['usage']) => ({
+    ...activeManifest!,
+    ...(usage ? { usage } : {}),
+  }));
   const engine = new SessionEngine({
     archive: {
       create: async (session) => {
@@ -118,7 +160,7 @@ async function fixture(
         recordedAudio.push({ channelId, audio });
       },
       appendLatency: async () => undefined,
-      finalize: async () => activeManifest!,
+      finalize,
       list: async () => [],
       retain: async () => activeManifest!,
       delete: async () => undefined,
@@ -134,7 +176,20 @@ async function fixture(
     cloudTranslation: translation,
     deterministicSpeech: renderer,
     naturalSpeech: renderer,
-    broadcast: () => undefined,
+    broadcast: (event) => {
+      events.push(event);
+    },
+    ...(usageModel
+      ? {
+          resolveTranslationProfile: () => ({
+            info: translationProfileInfo(
+              loadConfig({ OPENAI_API_KEY: 'test-key', OPENAI_TRANSCRIBE_MODEL: usageModel }),
+              'quality',
+            ),
+            provider: translation,
+          }),
+        }
+      : {}),
   });
   const targets: ChannelConfig[] = [
     {
@@ -156,7 +211,8 @@ async function fixture(
       speechEnabled,
     },
   ];
-  await engine.create({
+  const createRequest = {
+    ...(usageModel ? { translationProfile: 'quality' } : {}),
     sourceLanguage: source,
     targets,
     processingNode: {
@@ -175,9 +231,21 @@ async function fixture(
     contextDocumentIds: [],
     expectedDurationMinutes: 1,
     budgetWarningUsd: 20,
-  });
+  };
+  await engine.create(createRequest);
   await engine.start();
-  return { engine, renderer, captions, audio, recordedAudio, transcripts, relay };
+  return {
+    engine,
+    renderer,
+    captions,
+    audio,
+    recordedAudio,
+    transcripts,
+    relay,
+    events,
+    finalize,
+    createRequest,
+  };
 }
 
 function ingest(engine: SessionEngine, sequence: number) {
@@ -189,6 +257,110 @@ function ingest(engine: SessionEngine, sequence: number) {
     sequence,
   });
 }
+
+describe('SessionEngine service accounting', () => {
+  it('archives observed costs with no speech requests when speech is off', async () => {
+    const { engine, renderer, events } = await fixture('ru', false, {}, 'gpt-transcribe');
+    const source = {
+      data: new Uint8Array(96_000),
+      startMs: 0,
+      endMs: 1_000,
+      language: 'ru' as const,
+    };
+    const priorSessions = events.filter((e) => e.type === 'session').length;
+    const priorCosts = events.filter((e) => e.type === 'cost').length;
+    for (let sequence = 0; sequence < 50; sequence++)
+      await engine.ingestSourceAudio({ ...source, sequence });
+    expect(events.filter((e) => e.type === 'session')).toHaveLength(priorSessions);
+    expect(events.filter((e) => e.type === 'cost').length - priorCosts).toBe(1);
+    await ingest(engine, 0);
+    expect(renderer.pending).toHaveLength(0);
+    expect(engine.current()?.usage).toMatchObject({
+      capturedAudioSeconds: 50,
+      translationRequests: 1,
+      speechRequests: 0,
+      inputTokens: 1_000,
+      outputTokens: 100,
+      incomplete: false,
+    });
+    const { session, archive } = await engine.stop();
+    expect(archive?.usage).toEqual(session.usage);
+    expect(session.usage?.knownSubtotalUsd).toBeCloseTo(0.01875, 10);
+    expect(session.estimatedCostUsd).toBe(session.usage?.knownSubtotalUsd);
+  });
+
+  it('counts an already-started speech response after speech is disabled without playing it', async () => {
+    const { engine, renderer, audio } = await fixture('ru', true, {}, 'gpt-transcribe');
+    await ingest(engine, 0);
+    expect(engine.current()?.usage).toMatchObject({
+      speechRequests: 1,
+      pendingRequests: 1,
+      requestsWithoutPrice: 1,
+    });
+    await engine.setSpeechEnabled('channel-en', false);
+    renderer.resolve(0);
+    await ingest(engine, 1);
+    const { archive } = await engine.stop();
+    expect(audio).toHaveLength(0);
+    expect(archive?.usage).toMatchObject({
+      speechRequests: 1,
+      translationRequests: 2,
+      generatedAudioSeconds: 0.01,
+      pendingRequests: 0,
+      requestsWithoutPrice: 1,
+      incomplete: true,
+    });
+  });
+
+  it('freezes cancelled work at archive finalization and fences the next session', async () => {
+    const { engine, renderer, createRequest, finalize } = await fixture(
+      'ru',
+      true,
+      {},
+      'gpt-transcribe',
+    );
+    await ingest(engine, 0);
+    await engine.setSpeechEnabled('channel-en', false);
+    const originalFinalize = finalize.getMockImplementation()!;
+    finalize.mockImplementationOnce(async (...args) => {
+      renderer.resolve(0);
+      return originalFinalize(...args);
+    });
+    const completed = await engine.stop();
+    expect(completed.archive?.usage).toEqual(completed.session.usage);
+    expect(completed.session.usage).toMatchObject({
+      pendingRequests: 1,
+      generatedAudioSeconds: 0,
+      incomplete: true,
+    });
+    await engine.create(createRequest);
+    await engine.start();
+    renderer.resolve(0);
+    expect(engine.current()?.usage).toMatchObject({
+      translationRequests: 0,
+      speechRequests: 0,
+      pendingRequests: 0,
+    });
+    await engine.stop();
+  });
+
+  it('does not show a custom recognition model as free', async () => {
+    const { engine } = await fixture('en', false, {}, 'custom-recognizer');
+    await engine.ingestSourceAudio({
+      data: new Uint8Array(96_000),
+      startMs: 0,
+      endMs: 1_000,
+      sequence: 0,
+      language: 'en',
+    });
+    const { archive } = await engine.stop();
+    expect(archive?.usage).toMatchObject({
+      recognitionEstimateUsd: null,
+      knownSubtotalUsd: 0,
+      incomplete: true,
+    });
+  });
+});
 
 describe('SessionEngine independent text and audio', () => {
   it('records requested source audio while source playback is off', async () => {

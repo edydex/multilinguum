@@ -1,3 +1,4 @@
+import type { ProviderUsage, ServiceUsage } from './usage.js';
 import type {
   ArchiveManifest,
   ChannelConfig,
@@ -26,6 +27,7 @@ export interface RenderedSpeech extends AudioChunk {
 }
 
 export interface TranslationContext {
+  recordUsage?: (usage: ProviderUsage) => void;
   sourceLanguage: Language;
   targetLanguage: Language;
   glossary: Readonly<Record<string, string>>;
@@ -36,6 +38,7 @@ export interface TranslationContext {
 }
 
 export interface SpeechRenderContext {
+  recordUsage?: (usage: ProviderUsage) => void;
   signal?: AbortSignal;
   /** Audio already queued or being rendered ahead of this clause. */
   playbackBacklogMs: number;
@@ -114,7 +117,7 @@ export interface ArchiveStore {
   appendTranscript(segment: TranscriptSegment): Promise<void>;
   appendAudio(sessionId: string, channelId: string, chunk: RenderedSpeech): Promise<void>;
   appendLatency(sample: PipelineLatencySample): Promise<void>;
-  finalize(sessionId: string): Promise<ArchiveManifest>;
+  finalize(sessionId: string, usage?: ServiceUsage): Promise<ArchiveManifest>;
   list(): Promise<ArchiveManifest[]>;
   retain(sessionId: string, retained: boolean): Promise<ArchiveManifest>;
   delete(sessionId: string): Promise<void>;
