@@ -267,7 +267,7 @@ export class RealtimeCapturePipeline {
   }
 
   async #flushPendingSource(): Promise<void> {
-    if (this.#pendingSource.byteLength < 48_000 * bytesPerSample) return;
+    if (this.#pendingSource.byteLength === 0) return;
     const data = this.#pendingSource;
     this.#pendingSource = new Uint8Array();
     await this.#publishSourceChunk(data, this.#latestCapturedAtUnixMs || Date.now());

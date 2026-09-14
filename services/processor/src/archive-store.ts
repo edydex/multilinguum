@@ -79,13 +79,19 @@ export class FileArchiveStore implements ArchiveStore {
         documentIds: session.contextDocumentIds,
         sharedWithEconomy: session.shareSermonNotesWithEconomy === true,
       },
-      audioTracks: session.targets.map((channel) => ({
-        channelId: channel.id,
-        language: channel.targetLanguage,
-        path: `audio/${channel.id}.opus`,
-        codec: 'opus',
-        sampleRate: 48000,
-      })),
+      audioTracks: session.targets
+        .filter((channel) =>
+          channel.voiceMode === 'source'
+            ? session.archivePolicy.recordSource
+            : session.archivePolicy.recordTranslations,
+        )
+        .map((channel) => ({
+          channelId: channel.id,
+          language: channel.targetLanguage,
+          path: `audio/${channel.id}.opus`,
+          codec: 'opus',
+          sampleRate: 48000,
+        })),
       transcripts: session.targets.map((channel) => ({
         channelId: channel.id,
         language: channel.targetLanguage,

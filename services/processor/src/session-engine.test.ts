@@ -66,9 +66,14 @@ class DeferredSpeech implements SpeechRenderer {
   }
 }
 
-async function fixture(source: 'en' | 'ru' = 'ru', speechEnabled = true) {
+async function fixture(
+  source: 'en' | 'ru' = 'ru',
+  speechEnabled = true,
+  recording: { source?: boolean; translations?: boolean; realtime?: boolean } = {},
+) {
   const captions: TranscriptSegment[] = [];
   const audio: RenderedSpeech[] = [];
+  const recordedAudio: Array<{ channelId: string; audio: RenderedSpeech }> = [];
   const transcripts: TranscriptSegment[] = [];
   const renderer = new DeferredSpeech();
   let activeManifest: ArchiveManifest | undefined;
@@ -109,7 +114,9 @@ async function fixture(source: 'en' | 'ru' = 'ru', speechEnabled = true) {
       appendTranscript: async (segment) => {
         transcripts.push(segment);
       },
-      appendAudio: async () => undefined,
+      appendAudio: async (_sessionId, channelId, audio) => {
+        recordedAudio.push({ channelId, audio });
+      },
       appendLatency: async () => undefined,
       finalize: async () => activeManifest!,
       list: async () => [],
@@ -142,7 +149,7 @@ async function fixture(source: 'en' | 'ru' = 'ru', speechEnabled = true) {
     {
       id: `channel-${source === 'ru' ? 'en' : 'ru'}`,
       targetLanguage: source === 'ru' ? 'en' : 'ru',
-      translationProvider: 'openai-cascade',
+      translationProvider: recording.realtime ? 'openai-realtime' : 'openai-cascade',
       voiceMode: 'natural',
       fallbackOrder: ['mute'],
       muted: false,
@@ -162,15 +169,15 @@ async function fixture(source: 'en' | 'ru' = 'ru', speechEnabled = true) {
     archivePolicy: {
       retentionDays: 30,
       retainIndefinitely: false,
-      recordSource: true,
-      recordTranslations: true,
+      recordSource: recording.source ?? true,
+      recordTranslations: recording.translations ?? true,
     },
     contextDocumentIds: [],
     expectedDurationMinutes: 1,
     budgetWarningUsd: 20,
   });
   await engine.start();
-  return { engine, renderer, captions, audio, transcripts, relay };
+  return { engine, renderer, captions, audio, recordedAudio, transcripts, relay };
 }
 
 function ingest(engine: SessionEngine, sequence: number) {
@@ -184,6 +191,62 @@ function ingest(engine: SessionEngine, sequence: number) {
 }
 
 describe('SessionEngine independent text and audio', () => {
+  it('records requested source audio while source playback is off', async () => {
+    const { engine, audio, recordedAudio } = await fixture('ru', false);
+    await engine.ingestSourceAudio({
+      data: new Uint8Array(960),
+      startMs: 0,
+      endMs: 10,
+      sequence: 0,
+      language: 'ru',
+    });
+    await engine.stop();
+    expect(audio).toHaveLength(0);
+    expect(recordedAudio.map((item) => item.channelId)).toEqual(['channel-ru']);
+  });
+
+  it('plays source and generated audio without recording when recording is off', async () => {
+    const { engine, renderer, audio, recordedAudio } = await fixture('ru', true, {
+      source: false,
+      translations: false,
+    });
+    await engine.ingestSourceAudio({
+      data: new Uint8Array(960),
+      startMs: 0,
+      endMs: 10,
+      sequence: 0,
+      language: 'ru',
+    });
+    await ingest(engine, 0);
+    renderer.resolve(0);
+    await engine.stop();
+    expect(audio).toHaveLength(2);
+    expect(recordedAudio).toHaveLength(0);
+  });
+
+  it.each([false, true])(
+    'respects translated recording=%s for direct realtime audio',
+    async (enabled) => {
+      const { engine, audio, recordedAudio } = await fixture('ru', true, {
+        translations: enabled,
+        realtime: true,
+      });
+      await engine.ingestRealtimeAudio('channel-en', {
+        data: new Uint8Array(960),
+        encoding: 'pcm_s16le',
+        sampleRate: 48000,
+        startMs: 0,
+        endMs: 10,
+        sequence: 0,
+        language: 'en',
+        renderer: 'direct-realtime',
+      });
+      await engine.stop();
+      expect(audio).toHaveLength(1);
+      expect(recordedAudio).toHaveLength(enabled ? 1 : 0);
+    },
+  );
+
   it('publishes captions immediately and adds ordered speech timing after rendering', async () => {
     const { engine, renderer, captions, audio, transcripts } = await fixture();
     await engine.ingestProvisionalLiveTranscript(

@@ -4,6 +4,8 @@ The Community and SyncShow operator controls offer **Quality** and **Economy · 
 
 Both profiles use live speech recognition → text translation → optional generated speech. Turning speech off cancels speech generation while captions continue. Neither profile needs the cloned-voice worker or a GPU. Translated audio still needs the configured audio relay.
 
+Audio recording is separate from listener playback. The session's `archivePolicy.recordSource` controls original-audio recording even when original playback is off; `recordTranslations` controls recording generated or direct translated audio. Turning translated speech off prevents new synthesis, so it produces no new translated audio to record. These flags do not disable transcript storage. The current Community/SyncShow session forms enable both recording flags; API clients can disable either at session creation. Stopping capture preserves the final partial audio chunk, including tails shorter than a second.
+
 ## Configure the processor
 
 Keep keys in the private server environment, never in the browser or a repository. The base `OPENAI_API_KEY` is used for recognition and speech. Quality can use that key or its own text-project key. Economy requires a separate text-project key and never falls back to the base or Quality key.

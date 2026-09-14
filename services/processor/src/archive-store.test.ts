@@ -44,6 +44,60 @@ function session(id: string): ServiceSession {
 }
 
 describe('FileArchiveStore', () => {
+  it.each([
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])(
+    'enforces source=%s / translation=%s recording at the archive boundary',
+    async (recordSource, recordTranslations) => {
+      const root = await mkdtemp(path.join(tmpdir(), 'multilinguum-record-policy-'));
+      const store = new FileArchiveStore(root, 30);
+      const configured = session('recording-policy');
+      configured.archivePolicy = { ...configured.archivePolicy, recordSource, recordTranslations };
+      configured.targets.push({
+        id: 'channel-en',
+        targetLanguage: 'en',
+        translationProvider: 'openai-cascade',
+        voiceMode: 'natural',
+        fallbackOrder: ['mute'],
+        muted: false,
+      });
+      try {
+        const manifest = await store.create(configured, { processor: 'test' });
+        expect(manifest.audioTracks.map((track) => track.channelId)).toEqual([
+          ...(recordSource ? ['channel-ru'] : []),
+          ...(recordTranslations ? ['channel-en'] : []),
+        ]);
+        for (const [channelId, enabled] of [
+          ['channel-ru', recordSource],
+          ['channel-en', recordTranslations],
+        ] as const) {
+          if (enabled) continue;
+          await expect(
+            store.appendAudio(configured.id, channelId, {
+              data: new Uint8Array(960),
+              encoding: 'pcm_s16le',
+              sampleRate: 48000,
+              startMs: 0,
+              endMs: 10,
+              sequence: 0,
+              language: 'ru',
+              renderer: 'test',
+            }),
+          ).rejects.toThrow();
+          await expect(
+            access(path.join(root, configured.id, 'audio', `${channelId}.pcm`)),
+          ).rejects.toThrow();
+        }
+        expect(manifest.transcripts).toHaveLength(2);
+      } finally {
+        store.close();
+      }
+    },
+  );
+
   it('writes repeated channel ids only to the explicitly selected session', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'multilinguum-archive-'));
     const store = new FileArchiveStore(root, 30);

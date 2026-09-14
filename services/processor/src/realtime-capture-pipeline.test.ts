@@ -157,6 +157,35 @@ function cascadeSession(): ServiceSession {
 describe('RealtimeCapturePipeline', () => {
   afterEach(() => vi.useRealTimers());
 
+  it.each([485, 5485])(
+    'preserves a subsecond source tail when stopping after %s ms',
+    async (durationMs) => {
+      const session = liveSession();
+      session.targets = session.targets.map((target) => ({ ...target, speechEnabled: false }));
+      const ingestSourceAudio = vi.fn();
+      const engine = {
+        ingestSourceAudio,
+        reportChannelFailure: vi.fn(),
+      } as unknown as SessionEngine;
+      const pipeline = new RealtimeCapturePipeline(
+        engine,
+        session,
+        new FakeTranscriber(),
+        () => new FakeTranslationChannel(),
+      );
+      const pcm = new Uint8Array(durationMs * 96).fill(12);
+      await pipeline.start();
+      pipeline.push(pcm);
+      await pipeline.close();
+      const chunks = ingestSourceAudio.mock.calls.map(([chunk]) => chunk);
+      const recorded = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk.data)));
+      expect(recorded.byteLength).toBe(pcm.byteLength);
+      expect(recorded.equals(Buffer.from(pcm))).toBe(true);
+      expect(chunks[0].startMs).toBe(0);
+      expect(chunks.at(-1).endMs).toBe(durationMs);
+    },
+  );
+
   it('uses only the shared transcriber when translated speech is disabled', async () => {
     const session = liveSession();
     session.targets = session.targets.map((target) => ({ ...target, speechEnabled: false }));

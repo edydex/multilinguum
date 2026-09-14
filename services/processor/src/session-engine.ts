@@ -461,7 +461,9 @@ export class SessionEngine {
     }
     if (!this.#audioEnabled(runtime)) return;
     const generation = runtime.audioGeneration;
-    await this.#dependencies.archive.appendAudio(session.id, channelId, audio);
+    if (session.archivePolicy.recordTranslations) {
+      await this.#dependencies.archive.appendAudio(session.id, channelId, audio);
+    }
     if (generation !== runtime.audioGeneration || !this.#audioEnabled(runtime)) return;
     await this.#dependencies.relay.publishAudio(channelId, audio);
     if (generation !== runtime.audioGeneration) return;
@@ -492,7 +494,6 @@ export class SessionEngine {
       (channel) => channel.config.voiceMode === 'source',
     );
     if (!sourceChannel) throw new Error('Session has no delayed source-audio channel.');
-    if (!this.#audioEnabled(sourceChannel)) return;
     const generation = sourceChannel.audioGeneration;
     const audio = {
       data: input.data,
@@ -510,7 +511,10 @@ export class SessionEngine {
         session.startedAt,
       ),
     };
-    await this.#dependencies.archive.appendAudio(session.id, sourceChannel.config.id, audio);
+    // Recording is independent of whether listeners hear the original channel.
+    if (session.archivePolicy.recordSource) {
+      await this.#dependencies.archive.appendAudio(session.id, sourceChannel.config.id, audio);
+    }
     if (generation !== sourceChannel.audioGeneration || !this.#audioEnabled(sourceChannel)) return;
     const publishStartedAtUnixMs = Date.now();
     await this.#dependencies.relay.publishAudio(sourceChannel.config.id, audio);
@@ -872,11 +876,13 @@ export class SessionEngine {
         if (!result.ok) throw result.error;
         speechRenderer = result.rendered.renderer;
         const durationMs = speechDurationMs(result.rendered);
-        await this.#dependencies.archive.appendAudio(
-          session.id,
-          input.runtime.config.id,
-          result.rendered,
-        );
+        if (session.archivePolicy.recordTranslations) {
+          await this.#dependencies.archive.appendAudio(
+            session.id,
+            input.runtime.config.id,
+            result.rendered,
+          );
+        }
         if (!isCurrent()) return;
         const audioStartedAtUnixMs = Date.now();
         const queuedBeforeMs = this.#dependencies.relay.audioBacklogMs(input.runtime.config.id);
