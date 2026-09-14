@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -b && vite build",
+    "build": "tsc -b && vite build && vite build --config vite.client.config.ts",
     "dev": "vite --host 127.0.0.1 --port 4173",
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc -b --pretty false"

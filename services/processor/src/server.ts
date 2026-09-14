@@ -5,11 +5,12 @@ import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { AccessToken } from 'livekit-server-sdk';
 import { z, ZodError } from 'zod';
-import type { ProcessorEvent, PublicServiceState } from '@multilinguum/protocol';
+import type { ProcessorEvent, PublicAudioEvent, PublicServiceState } from '@multilinguum/protocol';
 import { languageSchema, transcriptInputSchema } from '@multilinguum/protocol';
 import type { WebSocket } from 'ws';
 import { FileArchiveStore } from './archive-store.js';
 import type { ProcessorConfig } from './config.js';
+import { BufferedAudioRelay } from './buffered-audio-relay.js';
 import { BroadcastMediaRelay } from './providers/broadcast-relay.js';
 import {
   DeterministicSpeechRenderer,
@@ -21,12 +22,16 @@ import {
 } from './providers/openai-cascade.js';
 import { VoiceWorkerSpeechRenderer } from './providers/voice-worker.js';
 import { LiveKitMediaRelay } from './providers/livekit-relay.js';
+import { SessionMediaRelay, usesRealtimeRelay } from './providers/session-media-relay.js';
 import { SessionEngine } from './session-engine.js';
 import { VoiceProfileStore } from './voice-profile-store.js';
 import { OpenAILiveTranscriber } from './providers/openai-live-transcriber.js';
 import { OpenAIRealtimeTranslationChannel } from './providers/openai-realtime-translation.js';
 import { RealtimeCapturePipeline } from './realtime-capture-pipeline.js';
 import { SermonContextStore } from './context-store.js';
+import { registerListenerClient } from './listener-client.js';
+import { bindSocketAccess, issueControlLease, readControlAccess } from './control-access.js';
+import { resolveTranslationProfile, translationProfileInfo } from './translation-profiles.js';
 
 const replaySchema = z.object({
   segments: z.array(transcriptInputSchema).min(1).max(10_000),
@@ -34,6 +39,7 @@ const replaySchema = z.object({
 
 const channelActionSchema = z.object({
   muted: z.boolean().optional(),
+  speechEnabled: z.boolean().optional(),
   forceNatural: z.boolean().optional(),
   restart: z.boolean().optional(),
 });
@@ -60,7 +66,11 @@ function webSocketControlToken(request: FastifyRequest): string {
   );
 }
 
-function publicState(config: ProcessorConfig, engine: SessionEngine): PublicServiceState {
+function publicState(
+  config: ProcessorConfig,
+  engine: SessionEngine,
+  relay: BufferedAudioRelay,
+): PublicServiceState {
   const session = engine.current();
   const active = session?.state === 'live';
   return {
@@ -73,12 +83,25 @@ function publicState(config: ProcessorConfig, engine: SessionEngine): PublicServ
           ...(session.startedAt ? { startedAt: session.startedAt } : {}),
           languages: session.targets.map((channel) => ({
             language: channel.targetLanguage,
+            channelId: channel.id,
+            audioGeneration: relay.generation(channel.id),
+            bufferedAudioAvailable:
+              !channel.muted &&
+              channel.speechEnabled !== false &&
+              channel.translationProvider !== 'openai-realtime',
             voiceMode: channel.voiceMode,
             available: !channel.muted,
+            audioAvailable:
+              !channel.muted &&
+              channel.speechEnabled !== false &&
+              (channel.translationProvider !== 'openai-realtime' ||
+                Boolean(config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET)),
             disclosure:
-              channel.voiceMode === 'source'
-                ? 'Original delayed audio'
-                : 'AI-generated translated voice',
+              channel.speechEnabled === false
+                ? 'Live text; audio is off'
+                : channel.voiceMode === 'source'
+                  ? 'Original delayed audio'
+                  : 'AI-generated translated voice',
           })),
         }
       : { languages: [] }),
@@ -105,6 +128,7 @@ export async function buildServer(config: ProcessorConfig) {
         : true,
   });
   await app.register(websocket);
+  registerListenerClient(app, config.LISTENER_CLIENT_ROOT);
 
   const operatorSockets = new Set<WebSocket>();
   const publicSockets = new Set<WebSocket>();
@@ -144,8 +168,13 @@ export async function buildServer(config: ProcessorConfig) {
       if (socket.readyState === socket.OPEN) socket.send(payload);
     }
     if (event.type === 'transcript' || event.type === 'session' || event.type === 'health') {
+      // Public listeners need availability, never private session configuration or health details.
+      const publicPayload =
+        event.type === 'transcript'
+          ? payload
+          : JSON.stringify({ type: 'public-state', state: publicState(config, engine, relay) });
       for (const socket of publicSockets) {
-        if (socket.readyState === socket.OPEN) socket.send(payload);
+        if (socket.readyState === socket.OPEN) socket.send(publicPayload);
       }
     }
   };
@@ -171,15 +200,31 @@ export async function buildServer(config: ProcessorConfig) {
     ? () =>
         new OpenAIRealtimeTranslationChannel(config.OPENAI_API_KEY!, config.OPENAI_TRANSLATE_MODEL)
     : undefined;
-  const relay =
-    config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET
+  const immediateRelay = new SessionMediaRelay((session) =>
+    usesRealtimeRelay(session) &&
+    config.LIVEKIT_URL &&
+    config.LIVEKIT_API_KEY &&
+    config.LIVEKIT_API_SECRET
       ? new LiveKitMediaRelay(
           config.LIVEKIT_URL.toString(),
           config.LIVEKIT_API_KEY,
           config.LIVEKIT_API_SECRET,
           broadcast,
         )
-      : new BroadcastMediaRelay(broadcast);
+      : new BroadcastMediaRelay(broadcast),
+  );
+  const broadcastAudio = (event: PublicAudioEvent) => {
+    const payload = JSON.stringify(event);
+    for (const socket of publicSockets) {
+      if (socket.readyState === socket.OPEN) socket.send(payload);
+    }
+  };
+  const relay = new BufferedAudioRelay(
+    immediateRelay,
+    (clip) => broadcastAudio({ type: 'audio-clip', clip }),
+    (sessionId, channelId, generation) =>
+      broadcastAudio({ type: 'audio-clear', sessionId, channelId, generation }),
+  );
   const engine = new SessionEngine({
     archive,
     context,
@@ -187,6 +232,7 @@ export async function buildServer(config: ProcessorConfig) {
     profiles,
     deterministicTranslation,
     deterministicSpeech,
+    resolveTranslationProfile: (id) => resolveTranslationProfile(config, id),
     broadcast,
     ...(cloudTranslation ? { cloudTranslation } : {}),
     ...(naturalSpeech ? { naturalSpeech } : {}),
@@ -200,11 +246,51 @@ export async function buildServer(config: ProcessorConfig) {
   });
   relay.onListenerCount((language, count) => engine.updateListenerCount(language, count));
 
+  let maintenance = false;
+  let retentionJob = Promise.resolve();
+
   const requireControl = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!hasControlToken(request, config.PROCESSOR_CONTROL_TOKEN)) {
       return reply.code(401).send({ error: 'Unauthorized' });
     }
+    if (
+      maintenance &&
+      request.method !== 'GET' &&
+      request.routeOptions.url !== '/api/maintenance'
+    ) {
+      return reply.code(503).send({ error: 'Translation maintenance is in progress' });
+    }
   };
+
+  const requireSessionControl = async (request: FastifyRequest, reply: FastifyReply) => {
+    reply.header('cache-control', 'private, no-store');
+    const authorization = request.headers.authorization ?? '';
+    const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const access = readControlAccess(token, config.PROCESSOR_CONTROL_TOKEN);
+    if (!access || !['master', 'session-control'].includes(access.scope))
+      return reply.code(401).send({ error: 'Control access expired or unauthorized' });
+    if (maintenance && request.method !== 'GET')
+      return reply.code(503).send({ error: 'Translation maintenance is in progress' });
+  };
+  const requireArchiveRead = async (request: FastifyRequest, reply: FastifyReply) => {
+    reply.header('cache-control', 'private, no-store').header('vary', 'Authorization');
+    const authorization = request.headers.authorization ?? '';
+    const token = authorization.startsWith('Bearer ') ? authorization.slice(7) : '';
+    const access = readControlAccess(token, config.PROCESSOR_CONTROL_TOKEN);
+    if (!access || !['master', 'archive-read'].includes(access.scope))
+      return reply.code(401).send({ error: 'Recorded-service access expired or unauthorized' });
+  };
+  app.post('/api/control/leases', { preHandler: requireControl }, async (request, reply) => {
+    const { subject, scope } = z
+      .object({
+        subject: z.string().min(1).max(128),
+        scope: z.enum(['session-control', 'archive-read']).default('session-control'),
+      })
+      .strict()
+      .parse(request.body);
+    reply.header('cache-control', 'private, no-store');
+    return issueControlLease(subject, config.PROCESSOR_CONTROL_TOKEN, Date.now(), scope);
+  });
 
   app.setErrorHandler((error, _request, reply) => {
     if (error instanceof ZodError) {
@@ -215,9 +301,9 @@ export async function buildServer(config: ProcessorConfig) {
     return reply.code(status).send({ error: message });
   });
 
-  app.get('/health', async () => ({ status: 'ok', version: '0.1.0' }));
+  app.get('/health', async () => ({ status: 'ok', version: '0.1.0', maintenance }));
 
-  app.get('/api/preflight', { preHandler: requireControl }, async () => {
+  app.get('/api/preflight', { preHandler: requireSessionControl }, async () => {
     const disk = await statfs(config.ARCHIVE_ROOT);
     const voice = clonedSpeech
       ? await clonedSpeech.health()
@@ -230,6 +316,9 @@ export async function buildServer(config: ProcessorConfig) {
         transcriptionModel: config.OPENAI_TRANSCRIBE_MODEL,
         liveAccessVerified: false,
       },
+      translationProfiles: (['quality', 'economy'] as const).map((id) =>
+        translationProfileInfo(config, id),
+      ),
       livekit: {
         configured: Boolean(
           config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET,
@@ -245,9 +334,37 @@ export async function buildServer(config: ProcessorConfig) {
     };
   });
 
-  app.get('/api/public/service', async () => publicState(config, engine));
+  app.get('/api/public/service', { config: { cors: { origin: '*' } } }, async (_request, reply) => {
+    reply.header('cache-control', 'no-store');
+    return publicState(config, engine, relay);
+  });
 
-  app.get('/api/public/token', async (request, reply) => {
+  app.get(
+    '/api/public/audio/:sessionId/:clipId.wav',
+    { config: { cors: { origin: '*' } } },
+    async (request, reply) => {
+      reply.header('cache-control', 'no-store').header('x-content-type-options', 'nosniff');
+      const parsed = z.object({ sessionId: z.uuid(), clipId: z.uuid() }).safeParse(request.params);
+      if (!parsed.success) return reply.code(404).send({ error: 'Live audio unavailable.' });
+      const session = engine.current();
+      if (session?.state !== 'live' || session.id !== parsed.data.sessionId)
+        return reply.code(410).send({ error: 'Live audio has ended.' });
+      const clip = relay.read(session.id, parsed.data.clipId);
+      const channel = session.targets.find((item) => item.id === clip?.metadata.channelId);
+      if (
+        !clip ||
+        !channel ||
+        channel.muted ||
+        channel.speechEnabled === false ||
+        clip.metadata.generation !== relay.generation(channel.id)
+      )
+        return reply.code(410).send({ error: 'Live audio unavailable.' });
+      return reply.type('audio/wav').send(clip.wave);
+    },
+  );
+
+  app.get('/api/public/token', { config: { cors: { origin: '*' } } }, async (request, reply) => {
+    reply.header('cache-control', 'no-store');
     const session = engine.current();
     if (session?.state !== 'live' || !session.relayRoom) {
       return reply.code(404).send({ error: 'No live service.' });
@@ -257,9 +374,15 @@ export async function buildServer(config: ProcessorConfig) {
     }
     const { language } = listenerTokenQuerySchema.parse(request.query);
     const requestedChannel = session.targets.find(
-      (channel) => channel.targetLanguage === language && !channel.muted,
+      (channel) =>
+        channel.targetLanguage === language && !channel.muted && channel.speechEnabled !== false,
     );
     if (!requestedChannel) return reply.code(404).send({ error: 'Language is not available.' });
+    if (!usesRealtimeRelay(session)) {
+      return reply.code(409).send({
+        error: 'This service uses buffered audio. Reload the listener to continue.',
+      });
+    }
     const token = new AccessToken(config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET, {
       identity: `listener-${randomUUID()}`,
       ttl: '5m',
@@ -280,23 +403,49 @@ export async function buildServer(config: ProcessorConfig) {
     };
   });
 
-  app.get('/api/public/events', { websocket: true }, (socket) => {
-    publicSockets.add(socket);
-    socket.send(JSON.stringify({ type: 'public-state', state: publicState(config, engine) }));
-    for (const events of captionHistory.values()) {
-      for (const event of events) socket.send(JSON.stringify(event));
+  app.get(
+    '/api/public/events',
+    { websocket: true, config: { cors: { origin: '*' } } },
+    (socket) => {
+      publicSockets.add(socket);
+      socket.send(
+        JSON.stringify({ type: 'public-state', state: publicState(config, engine, relay) }),
+      );
+      const session = engine.current();
+      if (session?.state === 'live') {
+        for (const clip of relay.snapshot(session.id)) {
+          const channel = session.targets.find((item) => item.id === clip.channelId);
+          if (channel && !channel.muted && channel.speechEnabled !== false)
+            socket.send(JSON.stringify({ type: 'audio-clip', clip } satisfies PublicAudioEvent));
+        }
+      }
+      for (const events of captionHistory.values()) {
+        for (const event of events) socket.send(JSON.stringify(event));
+      }
+      socket.on('close', () => publicSockets.delete(socket));
+    },
+  );
+  const publicHeartbeat = setInterval(() => {
+    const message = JSON.stringify({
+      type: 'public-state',
+      state: publicState(config, engine, relay),
+    });
+    for (const socket of publicSockets) {
+      if (socket.readyState === socket.OPEN) socket.send(message);
     }
-    socket.on('close', () => publicSockets.delete(socket));
-  });
+  }, 10000);
+  publicHeartbeat.unref();
+  app.addHook('onClose', async () => clearInterval(publicHeartbeat));
 
   app.get('/api/operator/events', { websocket: true }, (socket, request) => {
     const token = webSocketControlToken(request);
-    const left = Buffer.from(token);
-    const right = Buffer.from(config.PROCESSOR_CONTROL_TOKEN);
-    if (left.length !== right.length || !timingSafeEqual(left, right)) {
+    const access = readControlAccess(token, config.PROCESSOR_CONTROL_TOKEN);
+    if (!access || !['master', 'session-control'].includes(access.scope)) {
       socket.close(1008, 'Unauthorized');
       return;
     }
+    const authorization = bindSocketAccess(socket, access, config.PROCESSOR_CONTROL_TOKEN);
+    socket.on('message', (message, binary) => authorization.consume(message, binary));
     operatorSockets.add(socket);
     const session = engine.current();
     if (session) socket.send(JSON.stringify({ type: 'session', session } satisfies ProcessorEvent));
@@ -309,17 +458,21 @@ export async function buildServer(config: ProcessorConfig) {
   let activeCapture:
     | {
         socket: WebSocket;
+        ready: boolean;
         close: () => Promise<void>;
+        useCascadeForChannel: (channelId: string) => Promise<void>;
       }
     | undefined;
   app.get('/api/capture/audio', { websocket: true }, (socket, request) => {
     const query = request.query as { sessionId?: string };
-    const supplied = Buffer.from(webSocketControlToken(request));
-    const expected = Buffer.from(config.PROCESSOR_CONTROL_TOKEN);
+    const access = readControlAccess(
+      webSocketControlToken(request),
+      config.PROCESSOR_CONTROL_TOKEN,
+    );
     const session = engine.current();
     if (
-      supplied.length !== expected.length ||
-      !timingSafeEqual(supplied, expected) ||
+      !access ||
+      !['master', 'session-control'].includes(access.scope) ||
       !session ||
       session.id !== query.sessionId ||
       session.state !== 'live'
@@ -342,6 +495,7 @@ export async function buildServer(config: ProcessorConfig) {
       socket.close(1013, 'Another capture console is already streaming');
       return;
     }
+    const authorization = bindSocketAccess(socket, access, config.PROCESSOR_CONTROL_TOKEN);
     const pipeline = new RealtimeCapturePipeline(
       engine,
       session,
@@ -364,10 +518,31 @@ export async function buildServer(config: ProcessorConfig) {
         });
       return closePromise;
     };
-    activeCapture = { socket, close: closePipeline };
+    activeCapture = {
+      socket,
+      ready: false,
+      close: closePipeline,
+      useCascadeForChannel: async (channelId) => {
+        await ready;
+        if (!startupError) pipeline.useCascadeForChannel(channelId);
+      },
+    };
+    void ready.then(() => {
+      if (
+        !startupError &&
+        socket.readyState === socket.OPEN &&
+        acceptingFrames &&
+        authorization.valid() &&
+        activeCapture?.socket === socket
+      ) {
+        activeCapture.ready = true;
+        socket.send(JSON.stringify({ type: 'capture-ready', sessionId: session.id }));
+      }
+    });
     socket.on('message', (message, isBinary) => {
       try {
-        if (!acceptingFrames) return;
+        if (authorization.consume(message, isBinary)) return;
+        if (!acceptingFrames || !authorization.valid()) return;
         if (!isBinary) throw new Error('Capture frames must be binary.');
         const packet = Buffer.isBuffer(message) ? message : Buffer.from(message as ArrayBuffer);
         if (packet.byteLength < 16) throw new Error('Capture frame header is incomplete.');
@@ -383,7 +558,7 @@ export async function buildServer(config: ProcessorConfig) {
         void ready
           .then(() => {
             if (startupError) throw startupError;
-            pipeline.push(frame, capturedAt);
+            if (acceptingFrames && authorization.valid()) pipeline.push(frame, capturedAt);
           })
           .catch((error) =>
             socket.close(
@@ -400,27 +575,57 @@ export async function buildServer(config: ProcessorConfig) {
     });
   });
 
-  app.post('/api/sessions', { preHandler: requireControl }, async (request) =>
-    engine.create(request.body),
+  // Serialize state transitions from concurrent Heritage and SyncShow controllers.
+  let transition = Promise.resolve();
+  const changeSession = <T>(action: () => Promise<T>, allowMaintenance = false): Promise<T> => {
+    const result = transition.then(() => {
+      if (maintenance && !allowMaintenance)
+        throw new Error('Translation maintenance is in progress');
+      return action();
+    });
+    transition = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+  app.post('/api/maintenance', { preHandler: requireControl }, async (request) => {
+    const { enabled } = z.object({ enabled: z.boolean() }).strict().parse(request.body);
+    return changeSession(async () => {
+      const current = engine.current();
+      if (enabled && current && !['completed', 'failed'].includes(current.state)) {
+        throw new Error('Stop the current translation service before maintenance');
+      }
+      maintenance = enabled;
+      if (enabled) await retentionJob;
+      return { maintenance };
+    }, true);
+  });
+
+  app.post('/api/sessions', { preHandler: requireSessionControl }, async (request) =>
+    changeSession(() => engine.create(request.body)),
   );
-  app.get('/api/sessions/current', { preHandler: requireControl }, async () => ({
+  app.get('/api/sessions/current', { preHandler: requireSessionControl }, async () => ({
     session: engine.current(),
     health: engine.health(),
+    capture: { connected: Boolean(activeCapture), ready: Boolean(activeCapture?.ready) },
   }));
-  app.post('/api/sessions/current/start', { preHandler: requireControl }, async () =>
-    engine.start(),
+  app.post('/api/sessions/current/start', { preHandler: requireSessionControl }, async () =>
+    changeSession(() => engine.start()),
   );
-  app.post('/api/sessions/current/stop', { preHandler: requireControl }, async () => {
-    const capture = activeCapture;
-    if (capture) {
-      const draining = capture.close();
-      if (capture.socket.readyState === capture.socket.OPEN) {
-        capture.socket.close(1000, 'Service stopping');
+  app.post('/api/sessions/current/stop', { preHandler: requireSessionControl }, async () =>
+    changeSession(async () => {
+      const capture = activeCapture;
+      if (capture) {
+        const draining = capture.close();
+        if (capture.socket.readyState === capture.socket.OPEN) {
+          capture.socket.close(1000, 'Service stopping');
+        }
+        await draining;
       }
-      await draining;
-    }
-    return engine.stop();
-  });
+      return engine.stop();
+    }),
+  );
   app.post('/api/sessions/current/replay', { preHandler: requireControl }, async (request) => {
     const replay = replaySchema.parse(request.body);
     const translated = [];
@@ -432,21 +637,25 @@ export async function buildServer(config: ProcessorConfig) {
   });
   app.post(
     '/api/sessions/current/channels/:channelId',
-    { preHandler: requireControl },
+    { preHandler: requireSessionControl },
     async (request) => {
       const { channelId } = request.params as { channelId: string };
       const action = channelActionSchema.parse(request.body);
       if (action.muted !== undefined) await engine.setMuted(channelId, action.muted);
+      if (action.speechEnabled !== undefined)
+        await engine.setSpeechEnabled(channelId, action.speechEnabled);
+      if (action.muted === true || action.speechEnabled === false)
+        await activeCapture?.useCascadeForChannel(channelId);
       if (action.forceNatural) await engine.forceNatural(channelId);
       if (action.restart) await engine.restartChannel(channelId);
       return engine.health().find((health) => health.channelId === channelId);
     },
   );
 
-  app.get('/api/archives', { preHandler: requireControl }, async () => archive.list());
+  app.get('/api/archives', { preHandler: requireArchiveRead }, async () => archive.list());
   app.get(
     '/api/archives/:sessionId/audio/:channelId',
-    { preHandler: requireControl },
+    { preHandler: requireArchiveRead },
     async (request, reply) => {
       const { sessionId, channelId } = request.params as {
         sessionId: string;
@@ -461,7 +670,7 @@ export async function buildServer(config: ProcessorConfig) {
   );
   app.get(
     '/api/archives/:sessionId/transcripts/:channelId',
-    { preHandler: requireControl },
+    { preHandler: requireArchiveRead },
     async (request, reply) => {
       const { sessionId, channelId } = request.params as {
         sessionId: string;
@@ -476,7 +685,7 @@ export async function buildServer(config: ProcessorConfig) {
   );
   app.get(
     '/api/archives/:sessionId/latency',
-    { preHandler: requireControl },
+    { preHandler: requireArchiveRead },
     async (request, reply) => {
       const { sessionId } = request.params as { sessionId: string };
       const report = await archive.readLatency(sessionId);
@@ -497,29 +706,35 @@ export async function buildServer(config: ProcessorConfig) {
     return reply.code(204).send();
   });
 
-  app.get('/api/context-documents', { preHandler: requireControl }, async () => context.list());
-  app.post('/api/context-documents', { preHandler: requireControl }, async (request, reply) => {
-    const encodedFilename = request.headers['x-sermon-notes-filename'];
-    if (typeof encodedFilename !== 'string') {
-      return reply.code(400).send({ error: 'The sermon-note filename is required.' });
-    }
-    let filename: string;
-    try {
-      filename = decodeURIComponent(encodedFilename);
-    } catch {
-      return reply.code(400).send({ error: 'The sermon-note filename is invalid.' });
-    }
-    const contentType = request.headers['content-type']?.split(';', 1)[0];
-    if (contentType !== 'application/pdf' && contentType !== 'text/plain') {
-      return reply.code(415).send({ error: 'Upload sermon notes as PDF or plain text.' });
-    }
-    const body =
-      typeof request.body === 'string' ? Buffer.from(request.body, 'utf8') : request.body;
-    if (!Buffer.isBuffer(body)) {
-      return reply.code(400).send({ error: 'A non-empty sermon-note file is required.' });
-    }
-    return reply.code(201).send(await context.create(filename, contentType, body));
-  });
+  app.get('/api/context-documents', { preHandler: requireSessionControl }, async () =>
+    context.list(),
+  );
+  app.post(
+    '/api/context-documents',
+    { preHandler: requireSessionControl },
+    async (request, reply) => {
+      const encodedFilename = request.headers['x-sermon-notes-filename'];
+      if (typeof encodedFilename !== 'string') {
+        return reply.code(400).send({ error: 'The sermon-note filename is required.' });
+      }
+      let filename: string;
+      try {
+        filename = decodeURIComponent(encodedFilename);
+      } catch {
+        return reply.code(400).send({ error: 'The sermon-note filename is invalid.' });
+      }
+      const contentType = request.headers['content-type']?.split(';', 1)[0];
+      if (contentType !== 'application/pdf' && contentType !== 'text/plain') {
+        return reply.code(415).send({ error: 'Upload sermon notes as PDF or plain text.' });
+      }
+      const body =
+        typeof request.body === 'string' ? Buffer.from(request.body, 'utf8') : request.body;
+      if (!Buffer.isBuffer(body)) {
+        return reply.code(400).send({ error: 'A non-empty sermon-note file is required.' });
+      }
+      return reply.code(201).send(await context.create(filename, contentType, body));
+    },
+  );
 
   app.get('/api/voice-profiles', { preHandler: requireControl }, async () => profiles.list());
   app.post('/api/voice-profiles', { preHandler: requireControl }, async (request, reply) =>
@@ -575,10 +790,18 @@ export async function buildServer(config: ProcessorConfig) {
   });
 
   const retentionTimer = setInterval(() => {
-    void archive.purgeExpired().catch((error) => app.log.error(error));
+    if (!maintenance)
+      retentionJob = retentionJob
+        .then(() => archive.purgeExpired())
+        .then(() => undefined)
+        .catch((error) => app.log.error(error));
   }, 60 * 60_000);
   retentionTimer.unref();
-  app.addHook('onClose', async () => clearInterval(retentionTimer));
+  app.addHook('onClose', async () => {
+    clearInterval(retentionTimer);
+    await retentionJob;
+    archive.close();
+  });
 
   return app;
 }

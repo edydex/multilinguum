@@ -56,6 +56,10 @@ class FakeTranslationChannel implements RealtimeTranslationChannel {
   readonly #audioListeners = new Set<(audio: RenderedSpeech) => void>();
   readonly #errorListeners = new Set<(error: Error) => void>();
   config?: ChannelConfig;
+  cancelled = false;
+  cancel(): void {
+    this.cancelled = true;
+  }
 
   async start(_session: ServiceSession, channel: ChannelConfig): Promise<void> {
     this.config = channel;
@@ -152,6 +156,110 @@ function cascadeSession(): ServiceSession {
 
 describe('RealtimeCapturePipeline', () => {
   afterEach(() => vi.useRealTimers());
+
+  it.each([485, 5485])(
+    'preserves a subsecond source tail when stopping after %s ms',
+    async (durationMs) => {
+      const session = liveSession();
+      session.targets = session.targets.map((target) => ({ ...target, speechEnabled: false }));
+      const ingestSourceAudio = vi.fn();
+      const engine = {
+        ingestSourceAudio,
+        reportChannelFailure: vi.fn(),
+      } as unknown as SessionEngine;
+      const pipeline = new RealtimeCapturePipeline(
+        engine,
+        session,
+        new FakeTranscriber(),
+        () => new FakeTranslationChannel(),
+      );
+      const pcm = new Uint8Array(durationMs * 96).fill(12);
+      await pipeline.start();
+      pipeline.push(pcm);
+      await pipeline.close();
+      const chunks = ingestSourceAudio.mock.calls.map(([chunk]) => chunk);
+      const recorded = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk.data)));
+      expect(recorded.byteLength).toBe(pcm.byteLength);
+      expect(recorded.equals(Buffer.from(pcm))).toBe(true);
+      expect(chunks[0].startMs).toBe(0);
+      expect(chunks.at(-1).endMs).toBe(durationMs);
+    },
+  );
+
+  it('uses only the shared transcriber when translated speech is disabled', async () => {
+    const session = liveSession();
+    session.targets = session.targets.map((target) => ({ ...target, speechEnabled: false }));
+    const createDirect = vi.fn(() => new FakeTranslationChannel());
+    const transcriber = new FakeTranscriber();
+    const engine = {
+      ingestSourceAudio: vi.fn(),
+      reportChannelFailure: vi.fn(),
+    } as unknown as SessionEngine;
+    const pipeline = new RealtimeCapturePipeline(engine, session, transcriber, createDirect);
+    await pipeline.start();
+    pipeline.push(new Uint8Array(960));
+    await pipeline.close();
+    expect(createDirect).not.toHaveBeenCalled();
+    expect(transcriber.pushed).toHaveLength(1);
+  });
+
+  it('closes the paid direct channel and drops late output while source transcription continues', async () => {
+    const session = liveSession();
+    const transcriber = new FakeTranscriber();
+    const direct = new FakeTranslationChannel();
+    const engine = {
+      ingestRealtimeAudio: vi.fn(),
+      ingestRealtimeTranscript: vi.fn(),
+      ingestSourceAudio: vi.fn(),
+      ingestLiveTranscript: vi.fn(),
+      reportChannelFailure: vi.fn(),
+    } as unknown as SessionEngine;
+    const pipeline = new RealtimeCapturePipeline(engine, session, transcriber, () => direct);
+    await pipeline.start();
+    const delta: RealtimeTranscriptDelta = {
+      sessionId: session.id,
+      channelId: 'channel-en',
+      language: 'en',
+      delta: 'First sentence.',
+      sourceElapsedMs: 2000,
+      receivedAtUnixMs: Date.now(),
+    };
+    direct.emitTranscript(delta);
+    direct.emitAudio({
+      data: new Uint8Array(960),
+      encoding: 'pcm_s16le',
+      sampleRate: 48000,
+      startMs: 0,
+      endMs: 10,
+      sequence: 0,
+      language: 'en',
+      renderer: 'test',
+    });
+    // Disable before queued callbacks run, then simulate an already-delivered provider event.
+    pipeline.useCascadeForChannel('channel-en');
+    direct.emitTranscript({ ...delta, delta: 'Late sentence.' });
+    pipeline.push(new Uint8Array(960));
+    transcriber.emit({
+      id: 'next-source',
+      sessionId: session.id,
+      channelId: 'source-ru',
+      language: 'ru',
+      text: 'Grace and peace to you.',
+      sourceStartMs: 2000,
+      sourceEndMs: 5000,
+      emittedAt: new Date().toISOString(),
+      final: true,
+      sequence: 1,
+    });
+    await pipeline.close();
+    expect(direct.cancelled).toBe(true);
+    expect(direct.pushed).toHaveLength(0);
+    expect(transcriber.pushed).toHaveLength(1);
+    expect(engine.ingestRealtimeTranscript).not.toHaveBeenCalled();
+    expect(engine.ingestRealtimeAudio).not.toHaveBeenCalled();
+    const calls = vi.mocked(engine.ingestLiveTranscript).mock.calls;
+    expect(calls.some((call) => call[3]?.has('channel-en') && call[0].sequence >= 1)).toBe(true);
+  });
 
   it('fans capture to one shared transcriber and direct target, then normalizes outputs', async () => {
     const sourceAudio: unknown[] = [];

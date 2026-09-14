@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { ServiceUsagePanel } from './ServiceUsagePanel';
 import { invoke } from '@tauri-apps/api/core';
 import { estimateCloudServiceCost } from '@multilinguum/protocol';
 import type {
@@ -29,6 +30,7 @@ const allLanguages: Language[] = ['en', 'ru', 'es', 'uk'];
 
 interface TargetDraft {
   enabled: boolean;
+  speechEnabled: boolean;
   outputMode: OutputMode;
   profileId: string;
 }
@@ -64,6 +66,7 @@ function initialTargets(source: 'en' | 'ru'): Record<Language, TargetDraft> {
         // Keep v1 testing focused on the Russian/English pair. Spanish and
         // Ukrainian remain available, but begin opt-in until their latency is tuned.
         enabled: language === 'en' || language === 'ru',
+        speechEnabled: true,
         outputMode: language === source ? 'source' : 'generic-expressive',
         profileId: '',
       },
@@ -95,6 +98,7 @@ function channelConfigs(
           : {}),
         fallbackOrder: language === source ? ['mute'] : ['natural', 'mute'],
         muted: false,
+        speechEnabled: draft.speechEnabled,
       } satisfies ChannelConfig;
     });
 }
@@ -169,11 +173,12 @@ export function App() {
     () => localStorage.getItem('audioDeviceId') || undefined,
   );
   const [audioReady, setAudioReady] = useState(false);
+  const [captureRequested, setCaptureRequested] = useState(false);
   const [boothDeviceLabel, setBoothDeviceLabel] = useState<string>();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [playbackUrl, setPlaybackUrl] = useState<string>();
-  const audio = useAudioMeter(selectedDeviceId, audioReady);
+  const audio = useAudioMeter(selectedDeviceId, audioReady && captureRequested);
   const {
     devices,
     levelDb,
@@ -195,7 +200,7 @@ export function App() {
   const displayedLanguages: Language[] =
     live && session ? session.targets.map((channel) => channel.targetLanguage) : allLanguages;
   const capture = useAudioStreamer(
-    session?.state === 'live',
+    captureRequested && session?.state === 'live',
     session?.id,
     connection,
     subscribePcm,
@@ -276,6 +281,14 @@ export function App() {
           }));
         }
         if (event.type === 'error') setError(`${event.scope}: ${event.message}`);
+        if (event.type === 'cost' && event.usage) {
+          const usage = event.usage;
+          setSession((previous) =>
+            previous && previous.id === event.sessionId
+              ? { ...previous, usage, estimatedCostUsd: event.estimatedCostUsd }
+              : previous,
+          );
+        }
       },
       setConnected,
     );
@@ -509,6 +522,9 @@ export function App() {
       </aside>
 
       <main>
+        {tab === 'service' && session?.usage && (
+          <ServiceUsagePanel usage={session.usage} budgetWarningUsd={session.budgetWarningUsd} />
+        )}
         <header>
           <div>
             <p className="eyebrow">WORD OF TRUTH · LIVE INTERPRETATION</p>
@@ -539,7 +555,7 @@ export function App() {
                 <h2>{live ? 'Translation is live' : 'Ready when the room is ready'}</h2>
                 <p>
                   {live
-                    ? 'Language configuration is locked. Mute, restart, or fall back per channel below.'
+                    ? 'Languages are locked. Switch audio on or off, mute, or restart each channel below.'
                     : 'Confirm the mixer feed, languages, processing node, and estimated spend before starting.'}
                 </p>
               </div>
@@ -566,9 +582,17 @@ export function App() {
                     <h2>Mixer feed</h2>
                   </div>
                   <span className="ok">
-                    {capture.streaming ? 'Streaming' : 'Ready'} · 48 kHz mono · shared input
+                    {capture.streaming
+                      ? 'Streaming'
+                      : captureRequested
+                        ? 'Input connected'
+                        : 'Control only'}{' '}
+                    · 48 kHz mono · shared input
                   </span>
                 </div>
+                <button onClick={() => setCaptureRequested((value) => !value)}>
+                  {captureRequested ? 'Disconnect this mixer' : 'Connect this mixer'}
+                </button>
                 <label>
                   Audio device
                   <select
@@ -599,7 +623,10 @@ export function App() {
                   {channelCount > 1
                     ? `using channel ${activeChannel + 1} of ${channelCount}`
                     : 'single input channel'}
-                  . One shared read-only stream is open; OBS may use the same device.
+                  .{' '}
+                  {captureRequested
+                    ? 'This console has opened the selected input; OBS may use the same device.'
+                    : 'Connect the mixer only on the computer receiving the church audio feed.'}
                 </p>
               </section>
 
@@ -717,6 +744,7 @@ export function App() {
                   const draft = liveConfig
                     ? {
                         enabled: true,
+                        speechEnabled: liveConfig.speechEnabled !== false,
                         outputMode: (liveConfig.voiceMode === 'source'
                           ? 'source'
                           : liveConfig.voiceMode === 'cloned'
@@ -770,6 +798,32 @@ export function App() {
                         </label>
                         <span className={`health-dot ${itemHealth?.state ?? 'idle'}`} />
                       </div>
+                      <label className="check">
+                        <input
+                          type="checkbox"
+                          checked={draft.speechEnabled}
+                          disabled={!draft.enabled}
+                          onChange={(event) => {
+                            const speechEnabled = event.target.checked;
+                            if (liveConfig) {
+                              void api
+                                .channel(connection, channelId, { speechEnabled })
+                                .catch((cause) =>
+                                  setError(cause instanceof Error ? cause.message : String(cause)),
+                                );
+                            } else {
+                              setTargets((current) => ({
+                                ...current,
+                                [language]: { ...current[language], speechEnabled },
+                              }));
+                            }
+                          }}
+                        />
+                        {isSource ? 'Send original audio' : 'Generate translated speech'}
+                      </label>
+                      {!draft.speechEnabled && (
+                        <span className="field-note">Live text continues. Audio is off.</span>
+                      )}
                       <label>
                         Output voice
                         <select
@@ -780,7 +834,7 @@ export function App() {
                                 ? `cloned:${draft.profileId}`
                                 : draft.outputMode
                           }
-                          disabled={live || isSource || !draft.enabled}
+                          disabled={live || isSource || !draft.enabled || !draft.speechEnabled}
                           onChange={(event) => {
                             if (event.target.value === 'add-cloned') {
                               setAddingVoice(true);

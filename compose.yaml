@@ -9,7 +9,7 @@ services:
       PROCESSOR_HOST: 0.0.0.0
       PROCESSOR_PORT: 4310
       ARCHIVE_ROOT: /var/lib/multilinguum/archives
-      VOICE_WORKER_URL: http://voice-worker:4320
+      VOICE_WORKER_URL: ${VOICE_WORKER_URL:-}
     ports:
       - '4310:4310'
     volumes:
@@ -25,11 +25,9 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
-    depends_on:
-      voice-worker:
-        condition: service_healthy
 
   voice-worker:
+    profiles: [cloned-voice]
     build:
       context: services/voice-worker
     restart: unless-stopped

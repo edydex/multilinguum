@@ -1,3 +1,4 @@
+import type { ProviderUsage, ServiceUsage } from './usage.js';
 import type {
   ArchiveManifest,
   ChannelConfig,
@@ -15,6 +16,8 @@ export interface AudioChunk {
   sampleRate: number;
   startMs: number;
   endMs: number;
+  sourceStartAtUnixMs?: number;
+  sourceEndAtUnixMs?: number;
   sequence: number;
 }
 
@@ -24,6 +27,7 @@ export interface RenderedSpeech extends AudioChunk {
 }
 
 export interface TranslationContext {
+  recordUsage?: (usage: ProviderUsage) => void;
   sourceLanguage: Language;
   targetLanguage: Language;
   glossary: Readonly<Record<string, string>>;
@@ -34,6 +38,8 @@ export interface TranslationContext {
 }
 
 export interface SpeechRenderContext {
+  recordUsage?: (usage: ProviderUsage) => void;
+  signal?: AbortSignal;
   /** Audio already queued or being rendered ahead of this clause. */
   playbackBacklogMs: number;
   /** Broad source-language evidence; renderers must not mirror its word stress or pitch contour. */
@@ -65,6 +71,8 @@ export interface RealtimeTranslationChannel {
   start(session: ServiceSession, channel: ChannelConfig): Promise<void>;
   pushAudio(chunk: AudioChunk): Promise<void>;
   stop(): Promise<void>;
+  /** Immediately close the paid provider session without draining generated speech. */
+  cancel(): void;
   onTranscriptDelta(listener: (delta: RealtimeTranscriptDelta) => void): () => void;
   onAudio(listener: (audio: RenderedSpeech) => void): () => void;
   onError(listener: (error: Error) => void): () => void;
@@ -97,6 +105,8 @@ export interface MediaRelay {
   createSession(session: ServiceSession): Promise<void>;
   publishChannel(config: ChannelConfig): Promise<PublishedChannel>;
   audioBacklogMs(channelId: string): number;
+  /** Cancel queued frames and fence any publication already in progress. */
+  clearAudio(channelId: string): void;
   publishAudio(channelId: string, chunk: RenderedSpeech): Promise<void>;
   publishCaption(segment: TranscriptSegment): Promise<void>;
   closeSession(sessionId: string): Promise<void>;
@@ -107,7 +117,7 @@ export interface ArchiveStore {
   appendTranscript(segment: TranscriptSegment): Promise<void>;
   appendAudio(sessionId: string, channelId: string, chunk: RenderedSpeech): Promise<void>;
   appendLatency(sample: PipelineLatencySample): Promise<void>;
-  finalize(sessionId: string): Promise<ArchiveManifest>;
+  finalize(sessionId: string, usage?: ServiceUsage): Promise<ArchiveManifest>;
   list(): Promise<ArchiveManifest[]>;
   retain(sessionId: string, retained: boolean): Promise<ArchiveManifest>;
   delete(sessionId: string): Promise<void>;

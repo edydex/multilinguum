@@ -1,6 +1,7 @@
 import type {
   RenderedSpeech,
   SpeechRenderer,
+  SpeechRenderContext,
   TranscriptSegment,
   VoiceProfile,
 } from '@multilinguum/protocol';
@@ -15,7 +16,11 @@ export class VoiceWorkerSpeechRenderer implements SpeechRenderer {
     this.#token = token;
   }
 
-  async render(segment: TranscriptSegment, profile?: VoiceProfile): Promise<RenderedSpeech> {
+  async render(
+    segment: TranscriptSegment,
+    profile?: VoiceProfile,
+    context?: SpeechRenderContext,
+  ): Promise<RenderedSpeech> {
     if (!profile || profile.status !== 'ready' || profile.consent.revokedAt) {
       throw new Error('A ready, non-revoked voice profile is required for cloned output.');
     }
@@ -37,7 +42,10 @@ export class VoiceWorkerSpeechRenderer implements SpeechRenderer {
         // before referenceLanguage was recorded are the current RU -> EN profile.
         cfgWeight: profile.referenceLanguage === segment.language ? 0.35 : 0,
       }),
-      signal: AbortSignal.timeout(9_000),
+      signal: AbortSignal.any([
+        AbortSignal.timeout(9_000),
+        ...(context?.signal ? [context.signal] : []),
+      ]),
     });
     if (!response.ok) {
       throw new Error(`Voice worker failed with ${response.status}.`);

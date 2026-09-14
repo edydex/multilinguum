@@ -1,3 +1,4 @@
+import { sourceClock } from './source-clock.js';
 import { randomUUID } from 'node:crypto';
 import type {
   ArchiveManifest,
@@ -15,13 +16,20 @@ import type {
   SourceProcessingTiming,
   TranscriptSegment,
   TranslationProvider,
+  TranslationProfileId,
   VoiceProfile,
+  ProviderUsage,
 } from '@multilinguum/protocol';
-import { createSessionSchema, estimateCloudServiceCost } from '@multilinguum/protocol';
+import {
+  createSessionSchema,
+  estimateCloudServiceCost,
+  ServiceUsageMeter,
+} from '@multilinguum/protocol';
 import { defaultGlossary } from './glossary.js';
 import { buildLatencyBreakdown, summarizeLatency } from './latency.js';
 import type { SermonContextStore } from './context-store.js';
 import type { VoiceProfileStore } from './voice-profile-store.js';
+import type { ResolvedTranslationProfile } from './translation-profiles.js';
 import {
   buildCaptionWordTimings,
   estimateSpeechDurationMs,
@@ -38,6 +46,7 @@ export interface SessionEngineDependencies {
   context: SermonContextStore;
   deterministicTranslation: TranslationProvider;
   cloudTranslation?: TranslationProvider;
+  resolveTranslationProfile?: (id: TranslationProfileId) => ResolvedTranslationProfile;
   deterministicSpeech: SpeechRenderer;
   naturalSpeech?: SpeechRenderer;
   clonedSpeech?: SpeechRenderer;
@@ -54,6 +63,8 @@ interface RuntimeChannel {
   latencySamples: PipelineLatencySample[];
   audioChain: Promise<void>;
   pendingAudioEstimateMs: number;
+  audioGeneration: number;
+  speechAbort: AbortController;
   lastFinalCaptionSequence: number;
   lastProvisionalSequence: number;
   lastProvisionalRevision: number;
@@ -62,6 +73,10 @@ interface RuntimeChannel {
 export class SessionEngine {
   readonly #dependencies: SessionEngineDependencies;
   #session?: ServiceSession;
+  #profile: ResolvedTranslationProfile | undefined;
+  #usageMeter: ServiceUsageMeter | undefined;
+  #usageClosed = false;
+  #usagePublishedAt = -Infinity;
   readonly #channels = new Map<string, RuntimeChannel>();
   readonly #sourceAudioSpans = new Map<number, LatencySpan>();
 
@@ -96,6 +111,29 @@ export class SessionEngine {
       throw new Error('Only one church service can be active at a time.');
     }
     const parsed = createSessionSchema.parse(input);
+    const profile = parsed.translationProfile
+      ? this.#dependencies.resolveTranslationProfile?.(parsed.translationProfile)
+      : undefined;
+    if (parsed.translationProfile && !profile)
+      throw new Error('Translation profiles are not configured on this processor.');
+    if (
+      profile &&
+      parsed.targets.some(
+        (target) =>
+          target.voiceMode !== 'source' && target.translationProvider !== 'openai-cascade',
+      )
+    )
+      throw new Error(
+        'Translation profiles require text translation with optional separate speech.',
+      );
+    if (
+      profile?.info.id === 'economy' &&
+      parsed.contextDocumentIds.length &&
+      !parsed.shareSermonNotesWithEconomy
+    )
+      throw new Error(
+        'Enable Share selected notes with Economy to send these sermon notes to the sharing project.',
+      );
     await this.#dependencies.context.require(parsed.contextDocumentIds);
     const targets: ChannelConfig[] = parsed.targets.map((target) => ({
       id: target.id,
@@ -104,6 +142,7 @@ export class SessionEngine {
       voiceMode: target.voiceMode,
       fallbackOrder: target.fallbackOrder,
       muted: target.muted,
+      speechEnabled: target.speechEnabled,
       ...(target.voiceProfileId ? { voiceProfileId: target.voiceProfileId } : {}),
     }));
     const targetLanguages = targets.map((target) => target.targetLanguage);
@@ -129,6 +168,7 @@ export class SessionEngine {
       }
     }
 
+    const usageMeter = profile ? new ServiceUsageMeter(profile.info.transcriptionModel) : undefined;
     const createdAt = new Date().toISOString();
     const id = randomUUID();
     const session: ServiceSession = {
@@ -140,11 +180,29 @@ export class SessionEngine {
       createdAt,
       relayRoom: `service-${id}`,
       contextDocumentIds: parsed.contextDocumentIds,
+      ...(parsed.serviceReference ? { serviceReference: parsed.serviceReference } : {}),
+      shareSermonNotesWithEconomy:
+        profile?.info.id === 'economy' &&
+        parsed.shareSermonNotesWithEconomy &&
+        parsed.contextDocumentIds.length > 0,
       archivePolicy: parsed.archivePolicy,
       configurationLocked: false,
       budgetWarningUsd: parsed.budgetWarningUsd,
-      estimatedCostUsd: estimateCloudServiceCost(parsed.expectedDurationMinutes, targets),
+      estimatedCostUsd: profile
+        ? 0
+        : estimateCloudServiceCost(parsed.expectedDurationMinutes, targets),
+      ...(profile && usageMeter
+        ? {
+            translationProfile: profile.info,
+            costEstimateKind: 'observed-partial' as const,
+            usage: usageMeter.snapshot(),
+          }
+        : {}),
     };
+    this.#usageMeter = usageMeter;
+    this.#usageClosed = false;
+    this.#usagePublishedAt = -Infinity;
+    this.#profile = profile;
     this.#session = session;
     this.#channels.clear();
     this.#sourceAudioSpans.clear();
@@ -156,6 +214,8 @@ export class SessionEngine {
         latencySamples: [],
         audioChain: Promise.resolve(),
         pendingAudioEstimateMs: 0,
+        audioGeneration: 0,
+        speechAbort: new AbortController(),
         lastFinalCaptionSequence: -1,
         lastProvisionalSequence: -1,
         lastProvisionalRevision: -1,
@@ -411,9 +471,14 @@ export class SessionEngine {
     ) {
       throw new Error('Channel is not an active natural-voice Realtime channel.');
     }
-    if (runtime.config.muted) return;
-    await this.#dependencies.archive.appendAudio(session.id, channelId, audio);
+    if (!this.#audioEnabled(runtime)) return;
+    const generation = runtime.audioGeneration;
+    if (session.archivePolicy.recordTranslations) {
+      await this.#dependencies.archive.appendAudio(session.id, channelId, audio);
+    }
+    if (generation !== runtime.audioGeneration || !this.#audioEnabled(runtime)) return;
     await this.#dependencies.relay.publishAudio(channelId, audio);
+    if (generation !== runtime.audioGeneration) return;
     const expectedAt = Date.parse(session.startedAt ?? session.createdAt) + audio.startMs;
     const latencyMs = Math.max(0, Date.now() - expectedAt);
     runtime.health = {
@@ -441,6 +506,11 @@ export class SessionEngine {
       (channel) => channel.config.voiceMode === 'source',
     );
     if (!sourceChannel) throw new Error('Session has no delayed source-audio channel.');
+    if (this.#usageMeter) {
+      this.#usageMeter.recordAudio(input.sequence, input.data.byteLength);
+      this.#publishUsage(false);
+    }
+    const generation = sourceChannel.audioGeneration;
     const audio = {
       data: input.data,
       encoding: 'pcm_s16le' as const,
@@ -450,10 +520,21 @@ export class SessionEngine {
       sequence: input.sequence,
       language: input.language,
       renderer: 'delayed-original',
+      ...sourceClock(
+        input.startMs,
+        input.endMs,
+        input.timing?.captureCompletedAtUnixMs,
+        session.startedAt,
+      ),
     };
-    await this.#dependencies.archive.appendAudio(session.id, sourceChannel.config.id, audio);
+    // Recording is independent of whether listeners hear the original channel.
+    if (session.archivePolicy.recordSource) {
+      await this.#dependencies.archive.appendAudio(session.id, sourceChannel.config.id, audio);
+    }
+    if (generation !== sourceChannel.audioGeneration || !this.#audioEnabled(sourceChannel)) return;
     const publishStartedAtUnixMs = Date.now();
     await this.#dependencies.relay.publishAudio(sourceChannel.config.id, audio);
+    if (generation !== sourceChannel.audioGeneration) return;
     const publishCompletedAtUnixMs = Date.now();
     this.#sourceAudioSpans.set(input.sequence, {
       startedAtUnixMs: publishStartedAtUnixMs,
@@ -475,9 +556,58 @@ export class SessionEngine {
   async setMuted(channelId: string, muted: boolean): Promise<ChannelHealth> {
     const channel = this.#requiredChannel(channelId);
     channel.config = { ...channel.config, muted };
+    if (muted) this.#cancelAudio(channel);
+    this.#syncChannelConfig(channel);
     channel.health = { ...channel.health, state: muted ? 'muted' : 'healthy' };
     this.#emitHealth(channel);
     return channel.health;
+  }
+
+  async setSpeechEnabled(channelId: string, enabled: boolean): Promise<ChannelHealth> {
+    const channel = this.#requiredChannel(channelId);
+    this.#cancelAudio(channel);
+    const generation = channel.audioGeneration;
+    // Report off immediately; turning on is only committed after the relay is ready.
+    channel.config = { ...channel.config, speechEnabled: false };
+    this.#syncChannelConfig(channel);
+    if (enabled) {
+      await this.#dependencies.relay.publishChannel({ ...channel.config, speechEnabled: true });
+      if (generation !== channel.audioGeneration) return channel.health;
+      channel.config = { ...channel.config, speechEnabled: true };
+      this.#syncChannelConfig(channel);
+    }
+    channel.health = {
+      ...channel.health,
+      backlogMs: 0,
+      state: channel.config.muted ? 'muted' : 'healthy',
+    };
+    this.#emitHealth(channel);
+    return channel.health;
+  }
+
+  #syncChannelConfig(channel: RuntimeChannel): void {
+    const session = this.#requiredSession();
+    this.#session = {
+      ...session,
+      targets: session.targets.map((target) =>
+        target.id === channel.config.id ? channel.config : target,
+      ),
+    };
+    this.#emitSession();
+  }
+
+  #audioEnabled(channel: RuntimeChannel): boolean {
+    return !channel.config.muted && channel.config.speechEnabled !== false;
+  }
+
+  #cancelAudio(channel: RuntimeChannel): void {
+    channel.audioGeneration += 1;
+    channel.speechAbort.abort();
+    channel.speechAbort = new AbortController();
+    channel.pendingAudioEstimateMs = 0;
+    // Old work is fenced even if a provider ignores cancellation. New speech does not wait for it.
+    channel.audioChain = Promise.resolve();
+    this.#dependencies.relay.clearAudio(channel.config.id);
   }
 
   async forceNatural(channelId: string): Promise<ChannelHealth> {
@@ -506,14 +636,25 @@ export class SessionEngine {
     return channel.health;
   }
 
-  async stop(): Promise<{ session: ServiceSession; archive: ArchiveManifest }> {
+  async stop(): Promise<{ session: ServiceSession; archive: ArchiveManifest | null }> {
     const session = this.#requiredSession();
+    if (session.state === 'preflight') {
+      this.#session = { ...session, state: 'completed', stoppedAt: new Date().toISOString() };
+      this.#emitSession();
+      return { session: this.#session, archive: null };
+    }
     if (!['live', 'failed'].includes(session.state)) throw new Error('Session is not active.');
     this.#session = { ...session, state: 'stopping' };
     this.#emitSession();
     await this.drainAudio();
     await this.#dependencies.relay.closeSession(session.id);
-    const archive = await this.#dependencies.archive.finalize(session.id);
+    // Freeze one receipt for the completed service. Detached, cancelled requests
+    // still pending here remain explicitly unpriced in both views and the archive.
+    this.#publishUsage();
+    this.#usageClosed = true;
+    const archive = this.#usageMeter
+      ? await this.#dependencies.archive.finalize(session.id, this.#usageMeter.snapshot())
+      : await this.#dependencies.archive.finalize(session.id);
     this.#session = {
       ...this.#session,
       state: 'completed',
@@ -521,6 +662,34 @@ export class SessionEngine {
     };
     this.#emitSession();
     return { session: this.#session, archive };
+  }
+
+  #recordProviderUsage(sessionId: string, receipt: ProviderUsage): void {
+    if (
+      !this.#usageMeter ||
+      this.#usageClosed ||
+      this.#session?.id !== sessionId ||
+      this.#session.state === 'completed'
+    )
+      return;
+    this.#usageMeter.record(receipt);
+    this.#publishUsage();
+  }
+
+  #publishUsage(force = true): void {
+    if (!this.#session || !this.#usageMeter) return;
+    const now = performance.now();
+    if (!force && now - this.#usagePublishedAt < 1_000) return;
+    this.#usagePublishedAt = now;
+    const usage = this.#usageMeter.snapshot();
+    this.#session = { ...this.#session, usage, estimatedCostUsd: usage.knownSubtotalUsd };
+    this.#dependencies.broadcast({
+      type: 'cost',
+      estimatedCostUsd: usage.knownSubtotalUsd,
+      budgetWarning: usage.knownSubtotalUsd >= this.#session.budgetWarningUsd,
+      sessionId: this.#session.id,
+      usage,
+    });
   }
 
   async #processChannel(
@@ -531,6 +700,7 @@ export class SessionEngine {
     followingText?: string,
   ): Promise<TranscriptSegment | undefined> {
     if (runtime.config.muted) return undefined;
+    const audioGeneration = runtime.audioGeneration;
     const session = this.#requiredSession();
     let translation: LatencySpan | undefined;
     let captionPublish: LatencySpan | undefined;
@@ -542,6 +712,7 @@ export class SessionEngine {
         const translationStartedAtUnixMs = Date.now();
         try {
           translated = await this.#translationProvider(runtime.config).translate(source, {
+            recordUsage: (usage) => this.#recordProviderUsage(session.id, usage),
             sourceLanguage: session.sourceLanguage,
             targetLanguage: runtime.config.targetLanguage,
             glossary: defaultGlossary[runtime.config.targetLanguage],
@@ -572,14 +743,34 @@ export class SessionEngine {
         });
       }
 
-      const finalCaption: TranscriptSegment = { ...translated, final: true };
+      const finalCaption: TranscriptSegment = {
+        ...translated,
+        ...sourceClock(
+          source.sourceStartMs,
+          source.sourceEndMs,
+          sourceTiming?.captureCompletedAtUnixMs,
+          session.startedAt,
+        ),
+        final: true,
+      };
       runtime.lastFinalCaptionSequence = Math.max(
         runtime.lastFinalCaptionSequence,
         finalCaption.sequence,
       );
       await this.#dependencies.archive.appendTranscript(finalCaption);
 
-      if (runtime.effectiveVoiceMode !== 'source') {
+      const captionStartedAtUnixMs = Date.now();
+      await this.#dependencies.relay.publishCaption(finalCaption);
+      captionPublish = {
+        startedAtUnixMs: captionStartedAtUnixMs,
+        completedAtUnixMs: Date.now(),
+      };
+
+      if (
+        runtime.effectiveVoiceMode !== 'source' &&
+        this.#audioEnabled(runtime) &&
+        audioGeneration === runtime.audioGeneration
+      ) {
         this.#enqueueSpeech({
           runtime,
           source,
@@ -607,13 +798,6 @@ export class SessionEngine {
         return finalCaption;
       }
 
-      const captionStartedAtUnixMs = Date.now();
-      await this.#dependencies.relay.publishCaption(finalCaption);
-      captionPublish = {
-        startedAtUnixMs: captionStartedAtUnixMs,
-        completedAtUnixMs: Date.now(),
-      };
-
       const sample = this.#latencySample({
         runtime,
         source,
@@ -631,7 +815,6 @@ export class SessionEngine {
         ...runtime.health,
         state: 'healthy',
         lastTranscriptAt: now,
-        ...(runtime.effectiveVoiceMode === 'source' ? {} : { lastAudioAt: now }),
         latencyMs: Math.max(0, measuredLatency),
         backlogMs,
         engine: `${this.#translationProvider(runtime.config).name}+${runtime.effectiveVoiceMode}`,
@@ -688,6 +871,9 @@ export class SessionEngine {
     translation?: LatencySpan | undefined;
   }): void {
     const session = this.#requiredSession();
+    const generation = input.runtime.audioGeneration;
+    const isCurrent = () =>
+      generation === input.runtime.audioGeneration && this.#audioEnabled(input.runtime);
     const estimateMs = estimateSpeechDurationMs(input.translated.text);
     const playbackBacklogMs = this.#playbackBacklogMs(input.runtime);
     const trailingPauseMs = targetTrailingPauseMs(
@@ -699,11 +885,21 @@ export class SessionEngine {
     const renderStartedAtUnixMs = Date.now();
     const renderPromise = this.#render(input.runtime, input.translated, {
       playbackBacklogMs,
+      recordUsage: (usage) => this.#recordProviderUsage(session.id, usage),
       sourceDelivery: input.source.sourceDelivery,
+      signal: input.runtime.speechAbort.signal,
     }).then(
       (rendered) => ({
         ok: true as const,
-        rendered: prepareSpeechForContinuousPlayout(rendered, trailingPauseMs, leadingPauseMs),
+        rendered: {
+          ...prepareSpeechForContinuousPlayout(rendered, trailingPauseMs, leadingPauseMs),
+          ...sourceClock(
+            input.source.sourceStartMs,
+            input.source.sourceEndMs,
+            input.sourceTiming?.captureCompletedAtUnixMs,
+            session.startedAt,
+          ),
+        },
         speechRender: {
           startedAtUnixMs: renderStartedAtUnixMs,
           completedAtUnixMs: Date.now(),
@@ -727,15 +923,19 @@ export class SessionEngine {
       let speechRenderer: string | undefined;
       try {
         const result = await renderPromise;
+        if (!isCurrent()) return;
         speechRender = result.speechRender;
         if (!result.ok) throw result.error;
         speechRenderer = result.rendered.renderer;
         const durationMs = speechDurationMs(result.rendered);
-        await this.#dependencies.archive.appendAudio(
-          session.id,
-          input.runtime.config.id,
-          result.rendered,
-        );
+        if (session.archivePolicy.recordTranslations) {
+          await this.#dependencies.archive.appendAudio(
+            session.id,
+            input.runtime.config.id,
+            result.rendered,
+          );
+        }
+        if (!isCurrent()) return;
         const audioStartedAtUnixMs = Date.now();
         const queuedBeforeMs = this.#dependencies.relay.audioBacklogMs(input.runtime.config.id);
         const playoutStartAtUnixMs = audioStartedAtUnixMs + queuedBeforeMs;
@@ -751,11 +951,13 @@ export class SessionEngine {
         };
         const captionStartedAtUnixMs = Date.now();
         await this.#dependencies.relay.publishCaption(queuedCaption);
+        if (!isCurrent()) return;
         captionPublish = {
           startedAtUnixMs: captionStartedAtUnixMs,
           completedAtUnixMs: Date.now(),
         };
         await this.#dependencies.relay.publishAudio(input.runtime.config.id, result.rendered);
+        if (!isCurrent()) return;
         audioPublish = {
           startedAtUnixMs: audioStartedAtUnixMs,
           completedAtUnixMs: Date.now(),
@@ -781,6 +983,7 @@ export class SessionEngine {
           outcome: 'complete',
         });
         await this.#recordLatency(input.runtime, sample);
+        if (!isCurrent()) return;
         const measuredLatency =
           sample.metrics.sourceEndToPlayoutMs ??
           sample.metrics.sourceEndToAudioMs ??
@@ -800,6 +1003,7 @@ export class SessionEngine {
         input.runtime.health = nextHealth;
         this.#emitHealth(input.runtime);
       } catch (error) {
+        if (!isCurrent()) return;
         input.runtime.pendingAudioEstimateMs = Math.max(
           0,
           input.runtime.pendingAudioEstimateMs - estimateMs,
@@ -819,9 +1023,10 @@ export class SessionEngine {
           error: message,
         });
         await this.#recordLatency(input.runtime, sample).catch(() => undefined);
+        if (!isCurrent()) return;
         input.runtime.health = {
           ...input.runtime.health,
-          state: input.runtime.effectiveVoiceMode === 'cloned' ? 'degraded' : 'failed',
+          state: 'degraded',
           backlogMs: this.#playbackBacklogMs(input.runtime),
           error: message,
           ...(input.runtime.latencySamples.length > 0
@@ -848,6 +1053,15 @@ export class SessionEngine {
     sourceAudioSequence: number | undefined,
     translationLookahead?: string,
   ): Promise<TranscriptSegment[]> {
+    source = {
+      ...source,
+      ...sourceClock(
+        source.sourceStartMs,
+        source.sourceEndMs,
+        timing?.captureCompletedAtUnixMs,
+        this.#requiredSession().startedAt,
+      ),
+    };
     const sourceAudioSpan =
       sourceAudioSequence === undefined
         ? undefined
@@ -946,12 +1160,17 @@ export class SessionEngine {
     if (config?.translationProvider === 'deterministic') {
       return this.#dependencies.deterministicTranslation;
     }
+    if (this.#profile) return this.#profile.provider;
     return this.#dependencies.cloudTranslation ?? this.#dependencies.deterministicTranslation;
   }
 
   #translationEngine(config: ChannelConfig): string {
     if (config.voiceMode === 'source') return 'delayed-original';
-    if (config.translationProvider === 'openai-realtime' && config.voiceMode === 'natural') {
+    if (
+      config.translationProvider === 'openai-realtime' &&
+      config.voiceMode === 'natural' &&
+      config.speechEnabled !== false
+    ) {
       return this.#dependencies.realtimeTranslationEngine ?? 'openai-realtime-not-configured';
     }
     return this.#translationProvider(config).name;

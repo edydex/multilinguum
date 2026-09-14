@@ -4,16 +4,24 @@ WORKDIR /workspace
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml tsconfig.base.json ./
 COPY packages/protocol/package.json packages/protocol/package.json
 COPY services/processor/package.json services/processor/package.json
-RUN pnpm install --frozen-lockfile --filter @multilinguum/protocol --filter @multilinguum/processor
+COPY apps/listener/package.json apps/listener/package.json
+COPY apps/operator/package.json apps/operator/package.json
+RUN pnpm install --frozen-lockfile --filter @multilinguum/protocol --filter @multilinguum/processor --filter @multilinguum/listener --filter @multilinguum/operator
 COPY packages/protocol packages/protocol
 COPY services/processor services/processor
+COPY apps/listener apps/listener
+COPY apps/operator apps/operator
 RUN pnpm --filter @multilinguum/protocol build \
     && pnpm --filter @multilinguum/processor build \
+    && pnpm --filter @multilinguum/listener build \
+    && pnpm --filter @multilinguum/operator build \
     && pnpm deploy --legacy --filter @multilinguum/processor --prod /output \
     && rm /output/node_modules/@multilinguum/protocol \
     && mkdir -p /output/node_modules/@multilinguum/protocol \
     && cp packages/protocol/package.json /output/node_modules/@multilinguum/protocol/package.json \
-    && cp -R packages/protocol/dist /output/node_modules/@multilinguum/protocol/dist
+    && cp -R packages/protocol/dist /output/node_modules/@multilinguum/protocol/dist \
+    && cp -R apps/listener/dist/client /output/client \
+    && cp apps/operator/dist/client/*.js /output/client/
 
 FROM node:24-bookworm-slim
 ENV NODE_ENV=production

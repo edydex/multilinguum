@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { TranscriptSegment } from '@multilinguum/protocol';
 import {
   captionWordState,
+  sourceCaptionIsVisible,
   mergeCaption,
   narratedAnchorSequence,
   visibleCaptionSegments,
@@ -70,4 +71,15 @@ describe('listener caption timeline', () => {
     expect(narratedAnchorSequence(captions, 2_500)).toBe(0);
     expect(narratedAnchorSequence(captions, 3_500)).toBe(1);
   });
+});
+
+it('holds future provisional text until its capture time, including a late microphone start', () => {
+  const segment = {
+    sourceStartMs: 0,
+    sourceStartAtUnixMs: 30000,
+    final: false,
+  } as TranscriptSegment;
+  expect(sourceCaptionIsVisible(segment, 29000, new Date(0).toISOString())).toBe(false);
+  expect(sourceCaptionIsVisible(segment, 30000, undefined)).toBe(true);
+  expect(sourceCaptionIsVisible(segment, undefined, new Date(0).toISOString())).toBe(false);
 });
