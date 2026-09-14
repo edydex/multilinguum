@@ -29,7 +29,6 @@ export interface ManagedOperatorOptions extends ServicePlanOptions {
 type Snapshot = Awaited<ReturnType<typeof api.current>>;
 type Preflight = {
   openai?: { configured: boolean };
-  livekit?: { configured: boolean };
   translationProfiles?: TranslationProfileInfo[];
 };
 const names = { en: 'English', ru: 'Russian', es: 'Spanish', uk: 'Ukrainian' };
@@ -670,7 +669,7 @@ export function ManagedOperator({
                 busy ||
                 expired ||
                 planBusy ||
-                (!speechEnabled && !preflight?.livekit?.configured) ||
+                (!speechEnabled && !preflight?.openai?.configured) ||
                 (locked && !live)
               }
               onChange={(event) => toggleSpeech(event.target.checked)}
@@ -678,8 +677,10 @@ export function ManagedOperator({
             Generate translated speech
           </label>
           <p>Text continues when speech is off. Turning speech off cancels queued voice output.</p>
-          {!preflight?.livekit?.configured && (
-            <p className="hint">Audio relay setup is needed for translated speech.</p>
+          {!preflight?.openai?.configured && (
+            <p className="hint">
+              Configure the OpenAI audio provider to generate translated speech.
+            </p>
           )}
           <div className="actions">
             {!live ? (
