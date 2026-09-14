@@ -22,6 +22,7 @@ import {
 } from './providers/openai-cascade.js';
 import { VoiceWorkerSpeechRenderer } from './providers/voice-worker.js';
 import { LiveKitMediaRelay } from './providers/livekit-relay.js';
+import { SessionMediaRelay, usesRealtimeRelay } from './providers/session-media-relay.js';
 import { SessionEngine } from './session-engine.js';
 import { VoiceProfileStore } from './voice-profile-store.js';
 import { OpenAILiveTranscriber } from './providers/openai-live-transcriber.js';
@@ -199,15 +200,19 @@ export async function buildServer(config: ProcessorConfig) {
     ? () =>
         new OpenAIRealtimeTranslationChannel(config.OPENAI_API_KEY!, config.OPENAI_TRANSLATE_MODEL)
     : undefined;
-  const immediateRelay =
-    config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET
+  const immediateRelay = new SessionMediaRelay((session) =>
+    usesRealtimeRelay(session) &&
+    config.LIVEKIT_URL &&
+    config.LIVEKIT_API_KEY &&
+    config.LIVEKIT_API_SECRET
       ? new LiveKitMediaRelay(
           config.LIVEKIT_URL.toString(),
           config.LIVEKIT_API_KEY,
           config.LIVEKIT_API_SECRET,
           broadcast,
         )
-      : new BroadcastMediaRelay(broadcast);
+      : new BroadcastMediaRelay(broadcast),
+  );
   const broadcastAudio = (event: PublicAudioEvent) => {
     const payload = JSON.stringify(event);
     for (const socket of publicSockets) {
@@ -361,6 +366,11 @@ export async function buildServer(config: ProcessorConfig) {
         channel.targetLanguage === language && !channel.muted && channel.speechEnabled !== false,
     );
     if (!requestedChannel) return reply.code(404).send({ error: 'Language is not available.' });
+    if (!usesRealtimeRelay(session)) {
+      return reply.code(409).send({
+        error: 'This service uses buffered audio. Reload the listener to continue.',
+      });
+    }
     const token = new AccessToken(config.LIVEKIT_API_KEY, config.LIVEKIT_API_SECRET, {
       identity: `listener-${randomUUID()}`,
       ttl: '5m',

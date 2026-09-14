@@ -7,6 +7,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { FastifyInstance } from 'fastify';
 import { loadConfig } from './config.js';
 import { DeterministicSpeechRenderer } from './providers/deterministic.js';
+import { LiveKitMediaRelay } from './providers/livekit-relay.js';
+import {
+  OpenAINaturalSpeechRenderer,
+  OpenAITextTranslationProvider,
+} from './providers/openai-cascade.js';
 import type { PublicAudioEvent } from '@multilinguum/protocol';
 import { buildServer } from './server.js';
 
@@ -610,6 +615,167 @@ describe('processor vertical slice', () => {
     expect(stop.statusCode).toBe(200);
     expect(stop.json().archive.audioTracks).toHaveLength(0);
     expect(stop.json().archive.transcripts).toHaveLength(2);
+  });
+
+  it.each(['quality', 'economy'] as const)(
+    'keeps %s speech usable when the configured optional relay is unavailable',
+    async (translationProfile) => {
+      const relayPublication = vi
+        .spyOn(LiveKitMediaRelay.prototype, 'publishChannel')
+        .mockRejectedValue(new Error('Synthetic relay outage'));
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(() => {
+          throw new Error('Unexpected external request');
+        }),
+      );
+      vi.spyOn(OpenAITextTranslationProvider.prototype, 'translate').mockImplementation(
+        async (segment, context) => ({
+          ...segment,
+          id: segment.id + '-translated',
+          channelId: context.targetLanguage,
+          language: context.targetLanguage,
+          text: 'Grace to you and peace from God our Father.',
+        }),
+      );
+      const render = vi
+        .spyOn(OpenAINaturalSpeechRenderer.prototype, 'render')
+        .mockImplementation(async (segment) => ({
+          data: new Uint8Array(9600).fill(7),
+          encoding: 'pcm_s16le',
+          sampleRate: 48000,
+          startMs: segment.sourceStartMs,
+          endMs: segment.sourceEndMs,
+          sequence: segment.sequence,
+          language: segment.language,
+          renderer: 'synthetic-test',
+        }));
+      const server = await testServer({
+        OPENAI_API_KEY: 'synthetic-audio-key',
+        OPENAI_ECONOMY_TEXT_API_KEY: 'synthetic-sharing-key',
+        OPENAI_ECONOMY_SHARING_CONFIRMED: 'true',
+        OPENAI_ECONOMY_OVERAGE_POLICY: 'allow-billed',
+        LIVEKIT_URL: 'wss://relay.invalid',
+        LIVEKIT_API_KEY: 'synthetic-relay-key',
+        LIVEKIT_API_SECRET: 'synthetic-relay-secret-at-least-32-characters',
+      });
+      await server.ready();
+      const events: PublicAudioEvent[] = [];
+      const socket = await server.injectWS('/api/public/events');
+      socket.on('message', (data) => events.push(JSON.parse(data.toString())));
+      try {
+        const request = sessionRequest();
+        const created = await server.inject({
+          method: 'POST',
+          url: '/api/sessions',
+          headers: headers(),
+          payload: {
+            ...request,
+            translationProfile,
+            targets: request.targets
+              .slice(0, 2)
+              .map((channel) => ({ ...channel, translationProvider: 'openai-cascade' })),
+          },
+        });
+        expect(created.statusCode).toBe(200);
+        const started = await server.inject({
+          method: 'POST',
+          url: '/api/sessions/current/start',
+          headers: headers(),
+          payload: {},
+        });
+        expect(started.statusCode).toBe(200);
+        const replay = (sequence: number) =>
+          server.inject({
+            method: 'POST',
+            url: '/api/sessions/current/replay',
+            headers: headers(),
+            payload: {
+              segments: [
+                {
+                  text: 'Благодать вам и мир от Бога Отца нашего.',
+                  sourceStartMs: 0,
+                  sourceEndMs: 1000,
+                  sequence,
+                  final: true,
+                },
+              ],
+            },
+          });
+        expect((await replay(0)).statusCode).toBe(200);
+        await new Promise((resolve) => setImmediate(resolve));
+        const clip = events.find((event) => event.type === 'audio-clip');
+        expect(clip?.type).toBe('audio-clip');
+        if (clip?.type !== 'audio-clip') throw new Error('Missing buffered audio');
+        const audioUrl = `/api/public/audio/${clip.clip.sessionId}/${clip.clip.id}.wav`;
+        const audio = await server.inject(audioUrl);
+        expect(audio.statusCode).toBe(200);
+        expect(audio.rawPayload.indexOf(Buffer.alloc(9600, 7))).toBeGreaterThanOrEqual(44);
+        expect((await server.inject('/api/public/token?language=en')).statusCode).toBe(409);
+        const speech = (speechEnabled: boolean) =>
+          server.inject({
+            method: 'POST',
+            url: '/api/sessions/current/channels/channel-en',
+            headers: headers(),
+            payload: { speechEnabled },
+          });
+        expect((await speech(false)).statusCode).toBe(200);
+        expect((await server.inject(audioUrl)).statusCode).toBe(410);
+        expect((await replay(1)).json().translated).toHaveLength(2);
+        expect(render).toHaveBeenCalledTimes(1);
+        expect((await speech(true)).statusCode).toBe(200);
+        expect((await server.inject(audioUrl)).statusCode).toBe(410);
+        expect((await replay(2)).statusCode).toBe(200);
+        expect(render).toHaveBeenCalledTimes(2);
+        expect(
+          (
+            await server.inject({
+              method: 'POST',
+              url: '/api/sessions/current/stop',
+              headers: headers(),
+              payload: {},
+            })
+          ).statusCode,
+        ).toBe(200);
+        expect(relayPublication).not.toHaveBeenCalled();
+        expect(fetch).not.toHaveBeenCalled();
+      } finally {
+        socket.terminate();
+      }
+    },
+  );
+
+  it('keeps the configured relay required for direct Realtime audio', async () => {
+    const publish = vi
+      .spyOn(LiveKitMediaRelay.prototype, 'publishChannel')
+      .mockRejectedValue(new Error('Synthetic direct-audio relay outage'));
+    const server = await testServer({
+      LIVEKIT_URL: 'wss://relay.invalid',
+      LIVEKIT_API_KEY: 'synthetic-relay-key',
+      LIVEKIT_API_SECRET: 'synthetic-relay-secret-at-least-32-characters',
+    });
+    const request = sessionRequest();
+    const created = await server.inject({
+      method: 'POST',
+      url: '/api/sessions',
+      headers: headers(),
+      payload: {
+        ...request,
+        targets: request.targets
+          .slice(0, 2)
+          .map((channel) => ({ ...channel, translationProvider: 'openai-realtime' })),
+      },
+    });
+    expect(created.statusCode).toBe(200);
+    const started = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/start',
+      headers: headers(),
+      payload: {},
+    });
+    expect(started.statusCode).toBe(409);
+    expect(started.json().error).toBe('Synthetic direct-audio relay outage');
+    expect(publish).toHaveBeenCalledOnce();
   });
 
   it('allows cloud-only production configuration without a GPU-worker secret', () => {

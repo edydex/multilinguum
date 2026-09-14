@@ -17,7 +17,6 @@ interface StoredClip {
 
 /** A short, memory-bounded live window, independent of the retained sermon archive. */
 export class BufferedAudioRelay implements MediaRelay {
-  readonly name: string;
   readonly #delegate: MediaRelay;
   readonly #publish: (clip: BufferedAudioClip) => void;
   readonly #clear: (sessionId: string, channelId: string, generation: number) => void;
@@ -37,12 +36,15 @@ export class BufferedAudioRelay implements MediaRelay {
     options: { now?: () => number; maximumBytes?: number; retentionMs?: number } = {},
   ) {
     this.#delegate = delegate;
-    this.name = `${delegate.name}+buffered-audio`;
     this.#publish = publish;
     this.#clear = clear;
     this.#now = options.now ?? Date.now;
     this.#maximumBytes = options.maximumBytes ?? 64 * 1024 * 1024;
     this.#retentionMs = options.retentionMs ?? 240_000;
+  }
+
+  get name(): string {
+    return `${this.#delegate.name}+buffered-audio`;
   }
 
   onListenerCount(listener: (language: Language, count: number) => void) {
