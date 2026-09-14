@@ -20,6 +20,10 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
+      - name: Install recording encoder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
 

@@ -517,7 +517,7 @@ describe('processor vertical slice', () => {
       headers: headers(),
       payload: {},
     });
-    expect(stopped.statusCode).toBe(200);
+    expect(stopped.statusCode, stopped.body).toBe(200);
     const id = stopped.json().archive.sessionId;
     const minted = await server.inject({
       method: 'POST',
