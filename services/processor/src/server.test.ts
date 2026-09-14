@@ -672,6 +672,11 @@ describe('processor vertical slice', () => {
           payload: {
             ...request,
             translationProfile,
+            archivePolicy: {
+              ...request.archivePolicy,
+              recordSource: false,
+              recordTranslations: false,
+            },
             targets: request.targets
               .slice(0, 2)
               .map((channel) => ({ ...channel, translationProvider: 'openai-cascade' })),
@@ -727,16 +732,13 @@ describe('processor vertical slice', () => {
         expect((await server.inject(audioUrl)).statusCode).toBe(410);
         expect((await replay(2)).statusCode).toBe(200);
         expect(render).toHaveBeenCalledTimes(2);
-        expect(
-          (
-            await server.inject({
-              method: 'POST',
-              url: '/api/sessions/current/stop',
-              headers: headers(),
-              payload: {},
-            })
-          ).statusCode,
-        ).toBe(200);
+        const stopped = await server.inject({
+          method: 'POST',
+          url: '/api/sessions/current/stop',
+          headers: headers(),
+          payload: {},
+        });
+        expect(stopped.statusCode, stopped.body).toBe(200);
         expect(relayPublication).not.toHaveBeenCalled();
         expect(fetch).not.toHaveBeenCalled();
       } finally {
