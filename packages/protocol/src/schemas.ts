@@ -19,6 +19,7 @@ export const channelConfigSchema = z
     voiceProfileId: z.string().min(1).optional(),
     fallbackOrder: z.array(z.enum(['natural', 'cloned', 'mute'])).min(1),
     muted: z.boolean(),
+    speechEnabled: z.boolean().default(true),
   })
   .superRefine((channel, context) => {
     if (channel.voiceMode === 'cloned' && !channel.voiceProfileId) {
@@ -30,7 +31,21 @@ export const channelConfigSchema = z
     }
   });
 
+export const serviceReferenceSchema = z
+  .object({
+    communityId: z.string().regex(/^[1-9][0-9]{0,15}$/),
+    serviceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/),
+    title: z.string().min(1).max(200),
+    serviceDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    serviceRevision: z.string().regex(/^[a-f0-9]{64}$/),
+    planRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+  })
+  .strict();
+
 export const createSessionSchema = z.object({
+  serviceReference: serviceReferenceSchema.optional(),
+  translationProfile: z.enum(['quality', 'economy']).optional(),
+  transcriptionProvider: z.enum(['auto', 'muse', 'openai']).optional(),
   sourceLanguage: sourceLanguageSchema,
   targets: z.array(channelConfigSchema).min(1).max(4),
   processingNode: z.object({
@@ -47,6 +62,7 @@ export const createSessionSchema = z.object({
     recordTranslations: z.boolean(),
   }),
   contextDocumentIds: z.array(z.string().uuid()).max(8).default([]),
+  shareSermonNotesWithEconomy: z.boolean().default(false),
   expectedDurationMinutes: z.number().positive().max(480).default(120),
   budgetWarningUsd: z.number().positive().default(20),
 });

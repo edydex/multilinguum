@@ -111,6 +111,17 @@ describe('archive review alignment', () => {
     expect(activeWordIndex(track.segments[0]!, 11_800, 3)).toBe(2);
   });
 
+  it('keeps text-only translation on source time for review without inventing speech timing', () => {
+    const track = buildReviewTrack('en', 'channel-en', undefined, transcript, latency, 'ru');
+    expect(track.audioUrl).toBeUndefined();
+    expect(track.segments.map((segment) => [segment.audioStartMs, segment.audioEndMs])).toEqual([
+      [10000, 13000],
+      [13000, 17000],
+    ]);
+    expect(sourceTimeAtAudio(track, 14000)).toBe(14000);
+    expect(audioTimeAtSource(track, 14000)).toBe(14000);
+  });
+
   it('parses retained JSONL with blank lines', () => {
     expect(parseJsonLines<{ value: number }>('{"value":1}\n\n{"value":2}\n')).toEqual([
       { value: 1 },

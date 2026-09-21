@@ -10,6 +10,26 @@
   background: #f5f3ef;
   font-synthesis: none;
 }
+.service-usage {
+  margin: 18px 0;
+  padding: 20px;
+  border: 1px solid #ded8e7;
+  border-radius: 12px;
+  background: #fff;
+}
+.service-usage h3 {
+  margin: 0 0 6px;
+}
+.service-usage summary {
+  cursor: pointer;
+}
+.service-usage dt {
+  margin-top: 12px;
+  font-weight: 600;
+}
+.service-usage dd {
+  margin-left: 0;
+}
 * {
   box-sizing: border-box;
 }
@@ -26,6 +46,19 @@ select {
 }
 button {
   cursor: pointer;
+}
+
+.muse-settings summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+.muse-settings p {
+  margin: 12px 0;
+  line-height: 1.5;
+}
+.muse-settings button {
+  min-height: 40px;
+  margin: 6px 8px 0 0;
 }
 .shell {
   min-height: 100vh;

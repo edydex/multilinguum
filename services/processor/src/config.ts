@@ -27,6 +27,17 @@ const environmentSchema = z.object({
   ARCHIVE_RETENTION_DAYS: z.coerce.number().int().min(1).default(30),
   SERVICE_BUDGET_WARNING_USD: z.coerce.number().positive().default(20),
   OPENAI_API_KEY: optionalString,
+  MUSE_API_KEY: optionalString,
+  TRANSCRIPTION_PROVIDER: z.enum(['auto', 'muse', 'openai']).default('auto'),
+  // OpenAI audio uses OPENAI_API_KEY. Sharing-project credentials are text-only.
+  OPENAI_QUALITY_TEXT_API_KEY: optionalString,
+  OPENAI_QUALITY_TEXT_MODEL: z.string().min(1).default('gpt-6-astra'),
+  OPENAI_QUALITY_REASONING_EFFORT: z.enum(['none', 'low']).default('low'),
+  OPENAI_ECONOMY_TEXT_API_KEY: optionalString,
+  OPENAI_ECONOMY_TEXT_MODEL: z.string().min(1).default('gpt-5.6-terra'),
+  OPENAI_ECONOMY_REASONING_EFFORT: z.enum(['none', 'low']).default('none'),
+  OPENAI_ECONOMY_SHARING_CONFIRMED: z.enum(['true', 'false']).default('false'),
+  OPENAI_ECONOMY_OVERAGE_POLICY: z.enum(['block', 'allow-billed']).default('block'),
   OPENAI_TRANSLATE_MODEL: z.string().default('gpt-realtime-translate'),
   OPENAI_TRANSCRIBE_MODEL: z.string().default('gpt-live-transcribe'),
   OPENAI_FILE_TRANSCRIBE_MODEL: z.string().default('gpt-4o-transcribe'),
@@ -38,6 +49,7 @@ const environmentSchema = z.object({
   VOICE_WORKER_URL: optionalUrl,
   VOICE_WORKER_TOKEN: z.string().min(24).default('development-voice-token-change-me'),
   CHURCH_NAME: z.string().default('Word of Truth'),
+  LISTENER_CLIENT_ROOT: optionalString,
 });
 
 export type ProcessorConfig = ReturnType<typeof loadConfig>;
@@ -47,7 +59,11 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   if (config.NODE_ENV === 'production' && config.PROCESSOR_CONTROL_TOKEN.includes('change-me')) {
     throw new Error('PROCESSOR_CONTROL_TOKEN must be replaced in production.');
   }
-  if (config.NODE_ENV === 'production' && config.VOICE_WORKER_TOKEN.includes('change-me')) {
+  if (
+    config.NODE_ENV === 'production' &&
+    config.VOICE_WORKER_URL &&
+    config.VOICE_WORKER_TOKEN.includes('change-me')
+  ) {
     throw new Error('VOICE_WORKER_TOKEN must be replaced in production.');
   }
   return config;

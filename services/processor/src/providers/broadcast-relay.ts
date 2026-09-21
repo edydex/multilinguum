@@ -40,12 +40,15 @@ export class BroadcastMediaRelay implements MediaRelay {
   }
 
   async publishAudio(_channelId: string, _chunk: RenderedSpeech): Promise<void> {
-    // Audio publication is handled by the configured LiveKit publisher in production.
+    // BufferedAudioRelay delivers cascade speech over HTTP without a LiveKit connection.
+    // Direct Realtime audio uses the separately configured LiveKit publisher.
   }
 
   audioBacklogMs(_channelId: string): number {
     return 0;
   }
+
+  clearAudio(_channelId: string): void {}
 
   async publishCaption(segment: TranscriptSegment): Promise<void> {
     this.#broadcast({ type: 'transcript', segment });

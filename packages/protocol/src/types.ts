@@ -1,3 +1,5 @@
+import type { ServiceUsage } from './usage.js';
+
 export const languages = ['en', 'ru', 'es', 'uk'] as const;
 export type Language = (typeof languages)[number];
 
@@ -5,6 +7,30 @@ export type SessionState = 'preflight' | 'starting' | 'live' | 'stopping' | 'com
 
 export type VoiceMode = 'source' | 'natural' | 'cloned';
 export type ProviderKind = 'openai-realtime' | 'openai-cascade' | 'local' | 'deterministic';
+
+export type TranslationProfileId = 'quality' | 'economy';
+
+/** Safe operator-facing configuration. Never include credentials or project identifiers. */
+export interface TranslationProfileInfo {
+  id: TranslationProfileId;
+  label: string;
+  ready: boolean;
+  unavailableReason?: string;
+  textModel: string;
+  reasoningEffort: 'none' | 'low';
+  transcriptionModel: string;
+  speechModel: string;
+  sharing: 'not-requested' | 'administrator-confirmed-text-project';
+  allowanceVerified: false;
+  overagePolicy: 'block' | 'allow-billed';
+  qualityValidated: false;
+  rates: {
+    checkedOn: string;
+    textInputPerMillionUsd: number | null;
+    textOutputPerMillionUsd: number | null;
+    transcriptionPerMinuteUsd: number | null;
+  };
+}
 
 export interface ProcessingNodeRef {
   id: string;
@@ -29,6 +55,8 @@ export interface ChannelConfig {
   voiceProfileId?: string;
   fallbackOrder: Array<'natural' | 'cloned' | 'mute'>;
   muted: boolean;
+  /** False disables audio generation/publication while translation continues. Omitted by older clients. */
+  speechEnabled?: boolean;
 }
 
 export interface ContextDocument {
@@ -40,7 +68,25 @@ export interface ContextDocument {
   characterCount: number;
 }
 
+/** Operator-declared link to the reviewed Community service, retained privately with the session. */
+export interface ServiceReference {
+  communityId: string;
+  serviceId: string;
+  title: string;
+  serviceDate: string;
+  serviceRevision: string;
+  planRevision: number;
+}
+
 export interface ServiceSession {
+  transcriptionProvider?: 'auto' | 'muse' | 'openai';
+  transcription?: {
+    provider: 'muse' | 'openai';
+    model: string;
+    ready: boolean;
+    detail: string;
+  };
+  serviceReference?: ServiceReference;
   id: string;
   state: SessionState;
   sourceLanguage: 'en' | 'ru';
@@ -51,10 +97,16 @@ export interface ServiceSession {
   stoppedAt?: string;
   relayRoom?: string;
   contextDocumentIds: string[];
+  /** Explicit permission for this session's selected notes to enter the Economy sharing project. */
+  shareSermonNotesWithEconomy?: boolean;
   archivePolicy: ArchivePolicy;
   configurationLocked: boolean;
   budgetWarningUsd: number;
   estimatedCostUsd: number;
+  usage?: ServiceUsage;
+  translationProfile?: TranslationProfileInfo;
+  /** Older profiles expose a recognition-only forecast; new ones expose an explicitly partial live subtotal. */
+  costEstimateKind?: 'transcription-only' | 'observed-partial';
 }
 
 export interface ConsentRecord {
@@ -185,6 +237,9 @@ export interface TranscriptSegment {
   sourceDelivery?: SourceDelivery | undefined;
   /** Semantic delivery decisions produced with the translation for narrator phrasing. */
   narrationPlan?: NarrationPlan | undefined;
+  /** Capture-clock source bounds; microphone capture may start after the session. */
+  sourceStartAtUnixMs?: number;
+  sourceEndAtUnixMs?: number;
   /** Server-clock schedule for the audio listeners actually hear. */
   playout?: CaptionPlayoutTiming;
   final: boolean;
@@ -257,6 +312,10 @@ export interface TranscriptManifest {
 }
 
 export interface ArchiveManifest {
+  serviceReference?: ServiceReference;
+  usage?: ServiceUsage;
+  translationProfile?: TranslationProfileInfo;
+  sermonNotes?: { documentIds: string[]; sharedWithEconomy: boolean };
   version: 1;
   sessionId: string;
   createdAt: string;
@@ -291,8 +350,33 @@ export type ProcessorEvent =
   | { type: 'health'; health: ChannelHealth }
   | { type: 'transcript'; segment: TranscriptSegment }
   | { type: 'latency'; sample: PipelineLatencySample }
-  | { type: 'cost'; estimatedCostUsd: number; budgetWarning: boolean }
+  | {
+      type: 'cost';
+      estimatedCostUsd: number;
+      budgetWarning: boolean;
+      sessionId?: string;
+      usage?: ServiceUsage;
+    }
   | { type: 'error'; scope: string; message: string };
+
+/** Public metadata only. PCM and private session configuration never enter events. */
+export interface BufferedAudioClip {
+  id: string;
+  sessionId: string;
+  channelId: string;
+  language: Language;
+  generation: number;
+  sequence: number;
+  sourceStartAtUnixMs: number;
+  sourceEndAtUnixMs: number;
+  publishedAtUnixMs: number;
+  durationMs: number;
+  byteLength: number;
+}
+
+export type PublicAudioEvent =
+  | { type: 'audio-clip'; clip: BufferedAudioClip }
+  | { type: 'audio-clear'; sessionId: string; channelId: string; generation: number };
 
 export interface PublicServiceState {
   active: boolean;
@@ -304,6 +388,12 @@ export interface PublicServiceState {
     language: Language;
     voiceMode: VoiceMode;
     available: boolean;
+    /** Separately reported so captions remain available without an audio relay. */
+    audioAvailable?: boolean;
+    /** Source-timestamped WAV window, independent of LiveKit credentials. */
+    bufferedAudioAvailable?: boolean;
+    channelId?: string;
+    audioGeneration?: number;
     disclosure: string;
   }>;
 }

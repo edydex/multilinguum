@@ -1,3 +1,4 @@
+import type { ServiceUsage } from '@multilinguum/protocol';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
@@ -51,6 +52,10 @@ export class FileArchiveStore implements ArchiveStore {
     `);
   }
 
+  close(): void {
+    this.#database.close();
+  }
+
   async create(
     session: ServiceSession,
     engineVersions: Record<string, string>,
@@ -67,16 +72,30 @@ export class FileArchiveStore implements ArchiveStore {
     const manifest: ArchiveManifest = {
       version: 1,
       sessionId: session.id,
+      ...(session.serviceReference
+        ? { serviceReference: structuredClone(session.serviceReference) }
+        : {}),
       createdAt: session.createdAt,
       sourceLanguage: session.sourceLanguage,
       engineVersions,
-      audioTracks: session.targets.map((channel) => ({
-        channelId: channel.id,
-        language: channel.targetLanguage,
-        path: `audio/${channel.id}.opus`,
-        codec: 'opus',
-        sampleRate: 48000,
-      })),
+      ...(session.translationProfile ? { translationProfile: session.translationProfile } : {}),
+      sermonNotes: {
+        documentIds: session.contextDocumentIds,
+        sharedWithEconomy: session.shareSermonNotesWithEconomy === true,
+      },
+      audioTracks: session.targets
+        .filter((channel) =>
+          channel.voiceMode === 'source'
+            ? session.archivePolicy.recordSource
+            : session.archivePolicy.recordTranslations,
+        )
+        .map((channel) => ({
+          channelId: channel.id,
+          language: channel.targetLanguage,
+          path: `audio/${channel.id}.opus`,
+          codec: 'opus',
+          sampleRate: 48000,
+        })),
       transcripts: session.targets.map((channel) => ({
         channelId: channel.id,
         language: channel.targetLanguage,
@@ -151,7 +170,7 @@ export class FileArchiveStore implements ArchiveStore {
     );
   }
 
-  async finalize(sessionId: string): Promise<ArchiveManifest> {
+  async finalize(sessionId: string, usage?: ServiceUsage): Promise<ArchiveManifest> {
     const manifest = await this.#readManifest(sessionId);
     await Promise.all(
       manifest.audioTracks.map(async (track) => {
@@ -190,17 +209,20 @@ export class FileArchiveStore implements ArchiveStore {
         await unlink(pcmPath);
       }),
     );
-    const audioTracks = await Promise.all(
-      manifest.audioTracks.map(async (track) => {
-        const filePath = path.join(this.#sessionRoot(sessionId), track.path);
-        try {
-          await stat(filePath);
-          return { ...track, sha256: await sha256File(filePath) };
-        } catch {
-          return track;
-        }
-      }),
-    );
+    const audioTracks = (
+      await Promise.all(
+        manifest.audioTracks.map(async (track) => {
+          const filePath = path.join(this.#sessionRoot(sessionId), track.path);
+          try {
+            await stat(filePath);
+            return { ...track, sha256: await sha256File(filePath) };
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+            return undefined;
+          }
+        }),
+      )
+    ).filter((track): track is NonNullable<typeof track> => track !== undefined);
     const transcripts = await Promise.all(
       manifest.transcripts.map(async (transcript) => {
         const filePath = path.join(this.#sessionRoot(sessionId), transcript.path);
@@ -242,6 +264,7 @@ export class FileArchiveStore implements ArchiveStore {
     const completedAt = new Date().toISOString();
     const integrityPayload = JSON.stringify({
       ...manifest,
+      ...(usage ? { usage } : {}),
       audioTracks,
       transcripts,
       latencyReport,
@@ -249,6 +272,7 @@ export class FileArchiveStore implements ArchiveStore {
     });
     const finalized: ArchiveManifest = {
       ...manifest,
+      ...(usage ? { usage } : {}),
       audioTracks,
       transcripts,
       latencyReport,

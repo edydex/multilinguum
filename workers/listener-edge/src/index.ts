@@ -8,11 +8,11 @@ const publicApiPaths = new Set(['/api/public/service', '/api/public/token', '/ap
 function secureHeaders(headers: Headers): Headers {
   headers.set(
     'content-security-policy',
-    "default-src 'self'; connect-src 'self' wss: https:; media-src 'self' blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'",
+    "default-src 'self'; connect-src 'self' wss: https:; media-src 'self' blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-ancestors 'self' https://wotbc.heritage.faith",
   );
   headers.set('referrer-policy', 'no-referrer');
   headers.set('x-content-type-options', 'nosniff');
-  headers.set('x-frame-options', 'DENY');
+  headers.delete('x-frame-options');
   headers.set('permissions-policy', 'camera=(), geolocation=(), microphone=()');
   return headers;
 }
@@ -33,6 +33,7 @@ async function proxyPublicApi(request: Request, environment: Environment): Promi
   });
   if (response.webSocket) return response;
   const headers = secureHeaders(new Headers(response.headers));
+  headers.set('access-control-allow-origin', '*');
   headers.set('cache-control', 'no-store');
   return new Response(response.body, { status: response.status, headers });
 }
@@ -40,15 +41,36 @@ async function proxyPublicApi(request: Request, environment: Environment): Promi
 export default {
   async fetch(request: Request, environment: Environment): Promise<Response> {
     const url = new URL(request.url);
-    if (publicApiPaths.has(url.pathname)) {
+    if (
+      publicApiPaths.has(url.pathname) ||
+      /^\/api\/public\/audio\/[0-9a-f-]{36}\/[0-9a-f-]{36}\.wav$/i.test(url.pathname)
+    ) {
       return proxyPublicApi(request, environment);
     }
     if (url.pathname.startsWith('/api/')) return new Response('Not found', { status: 404 });
     const response = await environment.ASSETS.fetch(request);
+    const headers = secureHeaders(new Headers(response.headers));
+    if (url.pathname.startsWith('/client/')) {
+      // A missing module must not receive the SPA HTML fallback with a successful status.
+      if (
+        !/^\/client\/[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*\.js$/.test(url.pathname) ||
+        !response.headers.get('content-type')?.includes('javascript')
+      ) {
+        return new Response('Client module not found', {
+          status: 404,
+          headers: { 'access-control-allow-origin': '*' },
+        });
+      }
+      headers.set('access-control-allow-origin', '*');
+      headers.set(
+        'cache-control',
+        url.pathname.endsWith('/heritage.js') ? 'no-cache' : 'public, max-age=31536000, immutable',
+      );
+    }
     return new Response(response.body, {
       status: response.status,
       statusText: response.statusText,
-      headers: secureHeaders(new Headers(response.headers)),
+      headers,
     });
   },
 } satisfies ExportedHandler<Environment>;
