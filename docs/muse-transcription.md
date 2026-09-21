@@ -20,4 +20,4 @@ The adapter uses `muse-voice-transcribe-1.0`, the authenticated WebSocket handsh
 
 Local tests cover overlapping and out-of-order turns, duplicate completions, PCM transport, language selection, rotation, bounded shutdown, secret redaction and encrypted storage. A real 12.306-second English fixture passed recognition, including Ezekiel, Nebuchadnezzar and justification. That fixture used macOS speech synthesis; it is not evidence of human sermon quality, venue latency, microphone acceptance, or Russian recognition. Browser configuration checks used fake credentials and mocked APIs in Chromium and Firefox.
 
-Deployment and release verification are recorded separately in the private Heritage integration repository. Source tests alone do not prove that WOTBC is running this version.
+Deployment and release verification are recorded separately in the Heritage integration repository, which is public. Keep credentials and private rehearsal material out of its evidence files. Source tests alone do not prove that WOTBC is running this version.
