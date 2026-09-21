@@ -3,8 +3,11 @@
 The normal church workflow uses the operator controls in Community or SyncShow.
 This standalone app is an additional macOS console; it still connects to a
 configured processor and does not bundle a translation server or provider keys.
-Its macOS package work is currently undergoing verification. No new installer
-release is claimed until the actual files and launch checks have passed.
+The 0.1.1 Apple-silicon and Intel packages passed hosted native builds and
+independent installer/mounted-bundle checks. The retained Apple-silicon app also
+passed a launch and version check; physical Intel launch and real capture are
+separate acceptance. Permanent private release publication is awaiting owner
+approval, so the successful build artifacts are not yet a published release.
 
 ## Build and inspect
 
