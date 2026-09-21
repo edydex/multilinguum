@@ -34,6 +34,8 @@ export interface ServiceUsage {
 export const usageRatesCheckedOn = '2026-09-14';
 
 export function recognitionRateUsd(model: string): number | null {
+  // Meta's published $0.18/hour rate, checked 2026-09-20.
+  if (model === 'muse-voice-transcribe-1.0') return 0.003;
   if (model === 'gpt-transcribe') return 0.0045;
   if (model === 'gpt-live-transcribe' || model === 'gpt-realtime-whisper') return 0.017;
   return null;

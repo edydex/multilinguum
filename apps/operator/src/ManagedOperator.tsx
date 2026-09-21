@@ -18,6 +18,8 @@ import { useAudioStreamer } from './useAudioStreamer';
 import { dbToMeterPercent, signalStatus } from './audioLevel';
 import { ManagedArchives } from './ManagedArchives';
 import { ServiceUsagePanel } from './ServiceUsagePanel';
+import { recognitionRateUsd } from '@multilinguum/protocol';
+import { MuseSettings, type MuseSettingsAccess } from './MuseSettings';
 
 export interface ControlLease {
   token: string;
@@ -25,12 +27,18 @@ export interface ControlLease {
   apiBase: string;
 }
 export interface ManagedOperatorOptions extends ServicePlanOptions {
+  museSettings?: MuseSettingsAccess;
   initialLease: ControlLease;
   requestAccess(): Promise<ControlLease>;
   requestArchiveAccess?(): Promise<ControlLease>;
 }
 type Snapshot = Awaited<ReturnType<typeof api.current>>;
 type Preflight = {
+  transcription?: {
+    muse: { configured: boolean };
+    english: { provider: string; model: string; ready: boolean; detail: string };
+    russian: { provider: string; model: string; ready: boolean; detail: string };
+  };
   openai?: { configured: boolean };
   translationProfiles?: TranslationProfileInfo[];
 };
@@ -43,6 +51,7 @@ export function ManagedOperator({
   loadServicePlans,
   saveServicePlan,
   preferredServiceId,
+  museSettings,
 }: ManagedOperatorOptions) {
   const [lease, setLease] = useState(initialLease);
   const [accessError, setAccessError] = useState('');
@@ -62,6 +71,7 @@ export function ManagedOperator({
   const [source, setSource] = useState<'en' | 'ru'>('en');
   const [speech, setSpeech] = useState(false);
   const [profileId, setProfileId] = useState<TranslationProfileId>('quality');
+  const [recognition, setRecognition] = useState<'auto' | 'muse' | 'openai'>('auto');
   const [useNotes, setUseNotes] = useState(false);
   const [documents, setDocuments] = useState<ContextDocument[]>([]);
   const [noteIds, setNoteIds] = useState<string[]>([]);
@@ -80,6 +90,7 @@ export function ManagedOperator({
   const expired = lease.expiresAtUnixMs <= Date.now();
   const selectedService = plans.find((plan) => plan.id === serviceId);
   const settings: TranslationSettings = {
+    transcriptionProvider: recognition,
     sourceLanguage: source,
     translationProfile: profileId,
     speechEnabled: speech,
@@ -98,6 +109,7 @@ export function ManagedOperator({
     setShareNotes(false);
     if (plan?.settings && !latestLocked.current) {
       setSource(plan.settings.sourceLanguage);
+      setRecognition(plan.settings.transcriptionProvider ?? 'auto');
       setProfileId(plan.settings.translationProfile);
       setSpeech(plan.settings.speechEnabled);
       setNoteIds(plan.settings.contextDocumentIds);
@@ -311,6 +323,7 @@ export function ManagedOperator({
       await api.create(connection, {
         ...(reference ? { serviceReference: reference } : {}),
         translationProfile: profileId,
+        transcriptionProvider: recognition,
         sourceLanguage: source,
         targets: (['en', 'ru'] as const).map((language) => ({
           id: `channel-${language}`,
@@ -343,9 +356,27 @@ export function ManagedOperator({
     await api.start(connection);
   }
   const shownSource = locked && session ? session.sourceLanguage : source;
-  const selectedProfile = locked
+  const baseProfile = locked
     ? session?.translationProfile
     : preflight?.translationProfiles?.find((profile) => profile.id === profileId);
+  const recognitionModel = locked
+    ? session?.transcription?.model
+    : recognition === 'openai'
+      ? baseProfile?.transcriptionModel
+      : recognition === 'muse'
+        ? 'muse-voice-transcribe-1.0'
+        : preflight?.transcription?.[shownSource === 'en' ? 'english' : 'russian'].model;
+  const selectedProfile =
+    baseProfile && recognitionModel
+      ? {
+          ...baseProfile,
+          transcriptionModel: recognitionModel,
+          rates: {
+            ...baseProfile.rates,
+            transcriptionPerMinuteUsd: recognitionRateUsd(recognitionModel),
+          },
+        }
+      : baseProfile;
   const profileReady =
     locked && !session?.translationProfile ? preflight?.openai?.configured : selectedProfile?.ready;
   const notesReady =
@@ -517,6 +548,40 @@ export function ManagedOperator({
               <option value="economy">Economy · shared-data allowance</option>
             </select>
           </label>
+          <label>
+            Speech recognition
+            <select
+              value={locked ? (session?.transcriptionProvider ?? 'auto') : recognition}
+              disabled={locked || busy || planBusy}
+              onChange={(event) => setRecognition(event.target.value as 'auto' | 'muse' | 'openai')}
+            >
+              <option value="auto">Automatic · prefer Muse for English</option>
+              <option
+                value="muse"
+                disabled={shownSource !== 'en' || !preflight?.transcription?.muse.configured}
+              >
+                Muse · English
+              </option>
+              <option value="openai">OpenAI</option>
+            </select>
+          </label>
+          <p className="hint">
+            {locked
+              ? session?.transcription?.detail
+              : recognition === 'muse'
+                ? 'Muse recognizes English. Russian requires Automatic or OpenAI.'
+                : recognition === 'openai'
+                  ? 'OpenAI recognition selected.'
+                  : preflight?.transcription?.[shownSource === 'en' ? 'english' : 'russian'].detail}
+          </p>
+          {museSettings && (
+            <MuseSettings
+              access={museSettings}
+              onChanged={() => {
+                void api.preflight(connection).then((value) => setPreflight(value as Preflight));
+              }}
+            />
+          )}
           {selectedProfile && (
             <div className="profile-details">
               {!selectedProfile.ready && (

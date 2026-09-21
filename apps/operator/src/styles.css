@@ -47,6 +47,19 @@ select {
 button {
   cursor: pointer;
 }
+
+.muse-settings summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+.muse-settings p {
+  margin: 12px 0;
+  line-height: 1.5;
+}
+.muse-settings button {
+  min-height: 40px;
+  margin: 6px 8px 0 0;
+}
 .shell {
   min-height: 100vh;
   display: grid;

@@ -14,6 +14,7 @@ import type {
   VoiceProfile,
 } from '@multilinguum/protocol';
 import { api, subscribe, type OperatorConnection } from './api';
+import { MuseSettings } from './MuseSettings';
 import { useAudioMeter } from './useAudioMeter';
 import { useAudioStreamer } from './useAudioStreamer';
 import { dbToMeterPercent, signalStatus } from './audioLevel';
@@ -168,6 +169,7 @@ export function App() {
   const [voiceDraft, setVoiceDraft] = useState<VoiceProfileDraft>(newVoiceProfileDraft);
   const [preflight, setPreflight] = useState<Record<string, unknown>>();
   const [source, setSource] = useState<'en' | 'ru'>('ru');
+  const [recognition, setRecognition] = useState<'auto' | 'muse' | 'openai'>('auto');
   const [targets, setTargets] = useState(() => initialTargets('ru'));
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | undefined>(
     () => localStorage.getItem('audioDeviceId') || undefined,
@@ -376,6 +378,7 @@ export function App() {
     setError(undefined);
     try {
       await api.create(connection, {
+        transcriptionProvider: recognition,
         sourceLanguage: source,
         targets: nextChannelConfigs,
         processingNode: {
@@ -656,6 +659,27 @@ export function App() {
                 </div>
                 <p className="hint">
                   Pause translation during music. Source language cannot change mid-service.
+                </p>
+                <label>
+                  Speech recognition
+                  <select
+                    disabled={live || busy}
+                    value={live ? (session?.transcriptionProvider ?? 'auto') : recognition}
+                    onChange={(event) =>
+                      setRecognition(event.target.value as 'auto' | 'muse' | 'openai')
+                    }
+                  >
+                    <option value="auto">Automatic · prefer Muse for English</option>
+                    <option value="muse" disabled={configuredSource !== 'en'}>
+                      Muse · English
+                    </option>
+                    <option value="openai">OpenAI</option>
+                  </select>
+                </label>
+                <p className="hint">
+                  {live
+                    ? session?.transcription?.detail
+                    : 'Muse is used for English when its token is configured. Russian uses OpenAI. Configure Muse under Connection.'}
                 </p>
               </section>
             </div>
@@ -1207,6 +1231,7 @@ export function App() {
 
         {tab === 'connection' && (
           <div className="two-column">
+            <MuseSettings connection={connection} onChanged={() => void refresh()} />
             <section className="panel">
               <p className="eyebrow">PROCESSOR</p>
               <h2>Endpoint</h2>

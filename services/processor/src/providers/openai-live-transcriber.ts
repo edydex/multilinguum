@@ -32,7 +32,11 @@ interface CommittedWindow {
 }
 
 export interface TranscriptionSecretProvider {
-  create(input: { model: string; sourceLanguage: 'en' | 'ru' }): Promise<string>;
+  create(input: {
+    model: string;
+    sourceLanguage: 'en' | 'ru';
+    keywords?: string[];
+  }): Promise<string>;
 }
 
 class OpenAITranscriptionSecretProvider implements TranscriptionSecretProvider {
@@ -57,7 +61,14 @@ class OpenAITranscriptionSecretProvider implements TranscriptionSecretProvider {
             transcription: {
               model: input.model,
               prompt,
-              keywords: ['Bible', 'Gospel', 'Scripture', 'Библия', 'Евангелие', 'Писание'],
+              keywords: input.keywords ?? [
+                'Bible',
+                'Gospel',
+                'Scripture',
+                'Библия',
+                'Евангелие',
+                'Писание',
+              ],
               languages: [input.sourceLanguage],
               ...(input.model === 'gpt-transcribe' ? {} : { delay: 'low' as const }),
             },
@@ -77,6 +88,7 @@ export class OpenAILiveTranscriber implements Transcriber {
   readonly #model: string;
   readonly #secretProvider: TranscriptionSecretProvider;
   readonly #connectionFactory: RealtimeConnectionFactory;
+  readonly #keywords: ((session: ServiceSession) => Promise<string[]>) | undefined;
   readonly #segmentListeners = new Set<(segment: TranscriptSegment) => void>();
   readonly #errorListeners = new Set<(error: Error) => void>();
   readonly #itemTiming = new Map<string, ItemTiming>();
@@ -105,9 +117,11 @@ export class OpenAILiveTranscriber implements Transcriber {
       connectionFactory?: RealtimeConnectionFactory;
       stopDrainMs?: number;
       commitIntervalMs?: number;
+      keywords?: (session: ServiceSession) => Promise<string[]>;
     } = {},
   ) {
     this.#model = model;
+    this.#keywords = options.keywords;
     this.name = `openai-live-transcribe:${model}`;
     this.#secretProvider = options.secretProvider ?? new OpenAITranscriptionSecretProvider(apiKey);
     this.#connectionFactory = options.connectionFactory ?? createWebSocketRealtimeConnection;
@@ -139,6 +153,7 @@ export class OpenAILiveTranscriber implements Transcriber {
     const secret = await this.#secretProvider.create({
       model: this.#model,
       sourceLanguage: session.sourceLanguage,
+      ...(this.#keywords ? { keywords: await this.#keywords(session) } : {}),
     });
     const connection = this.#connectionFactory({
       url: 'wss://api.openai.com/v1/realtime',

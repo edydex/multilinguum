@@ -4,6 +4,7 @@ import { mkdir, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { ContextDocument } from '@multilinguum/protocol';
+import { transcriptionKeywords } from './providers/transcription-keywords.js';
 
 const execFileAsync = promisify(execFile);
 const maximumCharacters = 500_000;
@@ -152,5 +153,16 @@ export class SermonContextStore {
       .sort((left, right) => right.score - left.score || left.order - right.order)
       .slice(0, maximumResults)
       .map((candidate) => candidate.text);
+  }
+
+  async transcriptionKeywords(
+    documentIds: readonly string[],
+    language: 'en' | 'ru',
+  ): Promise<string[]> {
+    await this.require(documentIds);
+    const texts = await Promise.all(
+      documentIds.map((id) => readFile(path.join(this.#root, `${id}.extracted.txt`), 'utf8')),
+    );
+    return transcriptionKeywords(language, texts);
   }
 }

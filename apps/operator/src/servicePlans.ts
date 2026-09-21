@@ -1,5 +1,6 @@
 import type { ServiceReference } from '@multilinguum/protocol';
 export interface TranslationSettings {
+  transcriptionProvider?: 'auto' | 'muse' | 'openai';
   sourceLanguage: 'en' | 'ru';
   translationProfile: 'quality' | 'economy';
   speechEnabled: boolean;
@@ -35,6 +36,7 @@ export function sameSettings(
     right &&
     left.sourceLanguage === right.sourceLanguage &&
     left.translationProfile === right.translationProfile &&
+    (left.transcriptionProvider ?? 'auto') === (right.transcriptionProvider ?? 'auto') &&
     left.speechEnabled === right.speechEnabled &&
     JSON.stringify([...left.contextDocumentIds].sort()) ===
       JSON.stringify([...right.contextDocumentIds].sort()),

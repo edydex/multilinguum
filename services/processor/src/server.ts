@@ -5,7 +5,12 @@ import cors from '@fastify/cors';
 import websocket from '@fastify/websocket';
 import { AccessToken } from 'livekit-server-sdk';
 import { z, ZodError } from 'zod';
-import type { ProcessorEvent, PublicAudioEvent, PublicServiceState } from '@multilinguum/protocol';
+import type {
+  ProcessorEvent,
+  PublicAudioEvent,
+  PublicServiceState,
+  ServiceSession,
+} from '@multilinguum/protocol';
 import { languageSchema, transcriptInputSchema } from '@multilinguum/protocol';
 import type { WebSocket } from 'ws';
 import { FileArchiveStore } from './archive-store.js';
@@ -32,6 +37,12 @@ import { SermonContextStore } from './context-store.js';
 import { registerListenerClient } from './listener-client.js';
 import { bindSocketAccess, issueControlLease, readControlAccess } from './control-access.js';
 import { resolveTranslationProfile, translationProfileInfo } from './translation-profiles.js';
+import {
+  MuseLiveTranscriber,
+  MUSE_TRANSCRIPTION_MODEL,
+} from './providers/muse-live-transcriber.js';
+import { selectTranscription } from './transcription-selection.js';
+import { ProviderSecrets } from './provider-secrets.js';
 
 const replaySchema = z.object({
   segments: z.array(transcriptInputSchema).min(1).max(10_000),
@@ -109,6 +120,18 @@ function publicState(
 }
 
 export async function buildServer(config: ProcessorConfig) {
+  config = { ...config };
+  const providerSecrets = new ProviderSecrets(config.ARCHIVE_ROOT, config.PROCESSOR_CONTROL_TOKEN);
+  const environmentMuseKey = config.MUSE_API_KEY;
+  let savedMuse: Awaited<ReturnType<ProviderSecrets['readMuse']>>;
+  let museStorageError: string | undefined;
+  try {
+    savedMuse = await providerSecrets.readMuse();
+  } catch {
+    museStorageError = 'The saved token cannot be read. Paste it again to reconfigure Muse.';
+    config.MUSE_API_KEY = undefined;
+  }
+  if (savedMuse) config.MUSE_API_KEY = savedMuse.apiKey;
   const app = Fastify({ logger: config.NODE_ENV !== 'test' });
   app.addContentTypeParser(
     'application/octet-stream',
@@ -193,9 +216,17 @@ export async function buildServer(config: ProcessorConfig) {
   const clonedSpeech = config.VOICE_WORKER_URL
     ? new VoiceWorkerSpeechRenderer(config.VOICE_WORKER_URL.toString(), config.VOICE_WORKER_TOKEN)
     : undefined;
-  const realtimeTranscriberFactory = config.OPENAI_API_KEY
-    ? () => new OpenAILiveTranscriber(config.OPENAI_API_KEY!, config.OPENAI_TRANSCRIBE_MODEL)
-    : undefined;
+  const realtimeTranscriberFactory = (session: ServiceSession) => {
+    const selection =
+      session.transcription ??
+      selectTranscription(config, session.sourceLanguage, session.transcriptionProvider);
+    if (!selection.ready) throw new Error(selection.detail);
+    const keywords = (current: ServiceSession) =>
+      context.transcriptionKeywords(current.contextDocumentIds, current.sourceLanguage);
+    return selection.provider === 'muse'
+      ? new MuseLiveTranscriber(config.MUSE_API_KEY!, { keywords })
+      : new OpenAILiveTranscriber(config.OPENAI_API_KEY!, selection.model, { keywords });
+  };
   const realtimeTranslationFactory = config.OPENAI_API_KEY
     ? () =>
         new OpenAIRealtimeTranslationChannel(config.OPENAI_API_KEY!, config.OPENAI_TRANSLATE_MODEL)
@@ -233,6 +264,7 @@ export async function buildServer(config: ProcessorConfig) {
     deterministicTranslation,
     deterministicSpeech,
     resolveTranslationProfile: (id) => resolveTranslationProfile(config, id),
+    selectTranscription: (language, requested) => selectTranscription(config, language, requested),
     broadcast,
     ...(cloudTranslation ? { cloudTranslation } : {}),
     ...(naturalSpeech ? { naturalSpeech } : {}),
@@ -315,6 +347,17 @@ export async function buildServer(config: ProcessorConfig) {
         realtimeTranslationModel: config.OPENAI_TRANSLATE_MODEL,
         transcriptionModel: config.OPENAI_TRANSCRIBE_MODEL,
         liveAccessVerified: false,
+      },
+      transcription: {
+        preferred: config.TRANSCRIPTION_PROVIDER,
+        muse: {
+          configured: Boolean(config.MUSE_API_KEY),
+          model: MUSE_TRANSCRIPTION_MODEL,
+          supportedSourceLanguages: ['en'],
+          liveAccessVerified: false,
+        },
+        english: selectTranscription(config, 'en'),
+        russian: selectTranscription(config, 'ru'),
       },
       translationProfiles: (['quality', 'economy'] as const).map((id) =>
         translationProfileInfo(config, id),
@@ -487,8 +530,11 @@ export async function buildServer(config: ProcessorConfig) {
       socket.close(1008, 'Remote capture requires TLS');
       return;
     }
-    if (!realtimeTranscriberFactory || !realtimeTranslationFactory) {
-      socket.close(1013, 'OpenAI Realtime processing is not configured');
+    const recognition =
+      session.transcription ??
+      selectTranscription(config, session.sourceLanguage, session.transcriptionProvider);
+    if (!recognition.ready || !realtimeTranslationFactory) {
+      socket.close(1013, 'Recognition or translation is not configured');
       return;
     }
     if (activeCapture) {
@@ -499,7 +545,7 @@ export async function buildServer(config: ProcessorConfig) {
     const pipeline = new RealtimeCapturePipeline(
       engine,
       session,
-      realtimeTranscriberFactory(),
+      realtimeTranscriberFactory(session),
       realtimeTranslationFactory,
     );
     let startupError: Error | undefined;
@@ -604,6 +650,60 @@ export async function buildServer(config: ProcessorConfig) {
 
   app.post('/api/sessions', { preHandler: requireSessionControl }, async (request) =>
     changeSession(() => engine.create(request.body)),
+  );
+  const museSettings = () => ({
+    configured: Boolean(config.MUSE_API_KEY),
+    source: savedMuse ? 'saved' : config.MUSE_API_KEY ? 'environment' : 'none',
+    verifiedAt: savedMuse?.verifiedAt ?? null,
+    ...(museStorageError ? { error: museStorageError } : {}),
+  });
+  app.get('/api/settings/muse', { preHandler: requireControl }, async () => museSettings());
+  app.put(
+    '/api/settings/muse',
+    { preHandler: requireControl, bodyLimit: 8_192 },
+    async (request) => {
+      const { apiKey } = z
+        .object({ apiKey: z.string().trim().min(16).max(4_096).regex(/^\S+$/u) })
+        .strict()
+        .parse(request.body);
+      return changeSession(async () => {
+        if (engine.current() && !['completed', 'failed'].includes(engine.current()!.state))
+          throw new Error('Finish the current session before changing recognition credentials.');
+        const verifier = new MuseLiveTranscriber(apiKey);
+        const errors: Error[] = [];
+        verifier.onError((error) => errors.push(error));
+        try {
+          // Authenticate without uploading speech or starting a billed rehearsal.
+          await verifier.start({
+            id: randomUUID(),
+            sourceLanguage: 'en',
+            contextDocumentIds: [],
+          } as unknown as ServiceSession);
+          await verifier.stop();
+          if (errors.length)
+            throw new Error('Muse could not verify this token. Check API access and try again.');
+        } finally {
+          await verifier.stop();
+        }
+        const next = { apiKey, verifiedAt: new Date().toISOString() };
+        await providerSecrets.writeMuse(next);
+        savedMuse = next;
+        config.MUSE_API_KEY = apiKey;
+        museStorageError = undefined;
+        return museSettings();
+      });
+    },
+  );
+  app.delete('/api/settings/muse', { preHandler: requireControl }, async () =>
+    changeSession(async () => {
+      if (engine.current() && !['completed', 'failed'].includes(engine.current()!.state))
+        throw new Error('Finish the current session before changing recognition credentials.');
+      await providerSecrets.removeMuse();
+      savedMuse = undefined;
+      config.MUSE_API_KEY = environmentMuseKey;
+      museStorageError = undefined;
+      return museSettings();
+    }),
   );
   app.get('/api/sessions/current', { preHandler: requireSessionControl }, async () => ({
     session: engine.current(),

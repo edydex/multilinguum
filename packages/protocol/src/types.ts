@@ -79,6 +79,13 @@ export interface ServiceReference {
 }
 
 export interface ServiceSession {
+  transcriptionProvider?: 'auto' | 'muse' | 'openai';
+  transcription?: {
+    provider: 'muse' | 'openai';
+    model: string;
+    ready: boolean;
+    detail: string;
+  };
   serviceReference?: ServiceReference;
   id: string;
   state: SessionState;

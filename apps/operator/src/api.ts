@@ -107,6 +107,17 @@ async function uploadContextDocument(
 }
 
 export const api = {
+  museSettings: (connection: OperatorConnection) =>
+    request<import('./MuseSettings').MuseStatus>(connection, '/api/settings/muse'),
+  saveMuseSettings: (connection: OperatorConnection, apiKey: string) =>
+    request<import('./MuseSettings').MuseStatus>(connection, '/api/settings/muse', {
+      method: 'PUT',
+      body: JSON.stringify({ apiKey }),
+    }),
+  removeMuseSettings: (connection: OperatorConnection) =>
+    request<import('./MuseSettings').MuseStatus>(connection, '/api/settings/muse', {
+      method: 'DELETE',
+    }),
   preflight: (connection: OperatorConnection) =>
     request<Record<string, unknown>>(connection, '/api/preflight'),
   current: (connection: OperatorConnection) =>

@@ -45,6 +45,7 @@ export const serviceReferenceSchema = z
 export const createSessionSchema = z.object({
   serviceReference: serviceReferenceSchema.optional(),
   translationProfile: z.enum(['quality', 'economy']).optional(),
+  transcriptionProvider: z.enum(['auto', 'muse', 'openai']).optional(),
   sourceLanguage: sourceLanguageSchema,
   targets: z.array(channelConfigSchema).min(1).max(4),
   processingNode: z.object({

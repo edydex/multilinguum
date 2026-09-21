@@ -24,6 +24,7 @@ import {
   createSessionSchema,
   estimateCloudServiceCost,
   ServiceUsageMeter,
+  recognitionRateUsd,
 } from '@multilinguum/protocol';
 import { defaultGlossary } from './glossary.js';
 import { buildLatencyBreakdown, summarizeLatency } from './latency.js';
@@ -52,6 +53,10 @@ export interface SessionEngineDependencies {
   clonedSpeech?: SpeechRenderer;
   realtimeTranslationEngine?: string;
   liveTranscriptionEngine?: string;
+  selectTranscription?: (
+    language: 'en' | 'ru',
+    requested?: 'auto' | 'muse' | 'openai',
+  ) => NonNullable<ServiceSession['transcription']>;
   broadcast: (event: ProcessorEvent) => void;
 }
 
@@ -111,11 +116,26 @@ export class SessionEngine {
       throw new Error('Only one church service can be active at a time.');
     }
     const parsed = createSessionSchema.parse(input);
+    const transcription = this.#dependencies.selectTranscription?.(
+      parsed.sourceLanguage,
+      parsed.transcriptionProvider,
+    );
     const profile = parsed.translationProfile
       ? this.#dependencies.resolveTranslationProfile?.(parsed.translationProfile)
       : undefined;
     if (parsed.translationProfile && !profile)
       throw new Error('Translation profiles are not configured on this processor.');
+    if (transcription && profile) {
+      if (!transcription.ready) throw new Error(transcription.detail);
+      profile.info = {
+        ...profile.info,
+        transcriptionModel: transcription.model,
+        rates: {
+          ...profile.info.rates,
+          transcriptionPerMinuteUsd: recognitionRateUsd(transcription.model),
+        },
+      };
+    }
     if (
       profile &&
       parsed.targets.some(
@@ -175,6 +195,10 @@ export class SessionEngine {
       id,
       state: 'preflight',
       sourceLanguage: parsed.sourceLanguage,
+      ...(parsed.transcriptionProvider
+        ? { transcriptionProvider: parsed.transcriptionProvider }
+        : {}),
+      ...(transcription ? { transcription } : {}),
       targets,
       processingNode: parsed.processingNode,
       createdAt,
@@ -252,7 +276,10 @@ export class SessionEngine {
     this.#emitSession();
     await this.#dependencies.archive.create(startingSession, {
       processor: '0.1.0',
-      transcription: this.#dependencies.liveTranscriptionEngine ?? 'not-configured',
+      transcription:
+        startingSession.transcription?.model ??
+        this.#dependencies.liveTranscriptionEngine ??
+        'not-configured',
       translation: [
         ...new Set(startingSession.targets.map((target) => this.#translationEngine(target))),
       ].join(','),

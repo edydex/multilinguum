@@ -27,7 +27,9 @@ const environmentSchema = z.object({
   ARCHIVE_RETENTION_DAYS: z.coerce.number().int().min(1).default(30),
   SERVICE_BUDGET_WARNING_USD: z.coerce.number().positive().default(20),
   OPENAI_API_KEY: optionalString,
-  // Audio always uses OPENAI_API_KEY. Sharing-project credentials are text-only.
+  MUSE_API_KEY: optionalString,
+  TRANSCRIPTION_PROVIDER: z.enum(['auto', 'muse', 'openai']).default('auto'),
+  // OpenAI audio uses OPENAI_API_KEY. Sharing-project credentials are text-only.
   OPENAI_QUALITY_TEXT_API_KEY: optionalString,
   OPENAI_QUALITY_TEXT_MODEL: z.string().min(1).default('gpt-6-astra'),
   OPENAI_QUALITY_REASONING_EFFORT: z.enum(['none', 'low']).default('low'),

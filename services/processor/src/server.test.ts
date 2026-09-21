@@ -14,9 +14,55 @@ import {
 } from './providers/openai-cascade.js';
 import type { PublicAudioEvent } from '@multilinguum/protocol';
 import { buildServer } from './server.js';
+import { MuseLiveTranscriber } from './providers/muse-live-transcriber.js';
 
 const controlToken = 'test-control-token-with-at-least-32-characters';
 const servers: FastifyInstance[] = [];
+
+it('limits provider-token changes to the master credential and never returns the secret', async () => {
+  const server = await testServer();
+  const lease = issueControlLease('fixture', controlToken);
+  for (const method of ['GET', 'PUT', 'DELETE'] as const) {
+    const response = await server.inject({
+      method,
+      url: '/api/settings/muse',
+      headers: { authorization: `Bearer ${lease.token}` },
+      ...(method === 'PUT' ? { payload: { apiKey: 'PRIVATE_MUSE_KEY_SENTINEL' } } : {}),
+    });
+    expect(response.statusCode).toBe(401);
+  }
+  vi.spyOn(MuseLiveTranscriber.prototype, 'start').mockResolvedValue(undefined);
+  vi.spyOn(MuseLiveTranscriber.prototype, 'stop').mockResolvedValue(undefined);
+  const saved = await server.inject({
+    method: 'PUT',
+    url: '/api/settings/muse',
+    headers: headers(),
+    payload: { apiKey: 'PRIVATE_MUSE_KEY_SENTINEL' },
+  });
+  expect(saved.statusCode).toBe(200);
+  expect(saved.json()).toMatchObject({ configured: true, source: 'saved' });
+  for (const url of ['/api/settings/muse', '/api/preflight', '/api/public/service']) {
+    const response = await server.inject({ method: 'GET', url, headers: headers() });
+    expect(response.body).not.toContain('PRIVATE_MUSE_KEY_SENTINEL');
+  }
+  const preflight = (
+    await server.inject({ method: 'GET', url: '/api/preflight', headers: headers() })
+  ).json();
+  expect(preflight.transcription.english.provider).toBe('muse');
+  expect(preflight.transcription.russian.provider).toBe('openai');
+  await server.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    headers: headers(),
+    payload: sessionRequest(),
+  });
+  const locked = await server.inject({
+    method: 'DELETE',
+    url: '/api/settings/muse',
+    headers: headers(),
+  });
+  expect(locked.statusCode).toBe(409);
+});
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => server.close()));
