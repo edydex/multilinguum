@@ -1,6 +1,6 @@
 [package]
 name = "multilinguum-operator"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multilinguum church service operator console"
 authors = ["Multilinguum contributors"]
 edition = "2024"

@@ -6,3 +6,6 @@ fixtures/private
 data
 pnpm-lock.yaml
 LICENSE
+
+# Locally verified desktop preview artifacts.
+desktop-preview/

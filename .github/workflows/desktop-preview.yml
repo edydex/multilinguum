@@ -1,0 +1,60 @@
+name: Desktop preview packages
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'apps/operator/**'
+      - 'packages/protocol/**'
+      - 'pnpm-lock.yaml'
+      - 'scripts/macos-preview.py'
+      - '.github/workflows/desktop-preview.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'apps/operator/**'
+      - 'packages/protocol/**'
+      - 'pnpm-lock.yaml'
+      - 'scripts/macos-preview.py'
+      - '.github/workflows/desktop-preview.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS ${{ matrix.architecture }} package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            architecture: arm64
+          - runner: macos-15-intel
+            architecture: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @multilinguum/protocol build
+      - name: Embed exact source and select ad-hoc preview signing
+        run: python3 scripts/macos-preview.py prepare
+      - name: Build the actual app and installer
+        run: pnpm --filter @multilinguum/operator exec tauri build --ci --bundles app,dmg --config src-tauri/target/preview-config.json
+      - name: Verify the installer and mounted application
+        run: python3 scripts/macos-preview.py verify --architecture '${{ matrix.architecture }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: multilinguum-macos-${{ matrix.architecture }}-preview
+          path: desktop-preview/
+          if-no-files-found: error
+          retention-days: 30

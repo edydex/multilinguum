@@ -31,3 +31,6 @@ data/
 *.opus
 *.wav
 *.flac
+
+# Locally verified desktop preview artifacts.
+desktop-preview/
