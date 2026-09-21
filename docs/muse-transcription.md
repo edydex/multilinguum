@@ -4,7 +4,7 @@ In the standalone console, open **Processing node → Muse recognition settings*
 
 Choose **Automatic**, **Muse**, or **OpenAI** under Speech recognition before starting a session. Automatic prefers Muse for English when configured; it uses OpenAI for Russian and when Muse is not configured. The session records the actual recognition model, and observed usage uses that model's rate. There is no silent provider change during an active session. A failed connection is reported to the operator.
 
-Selected sermon notes contribute a bounded vocabulary list to both recognizers. Extraction runs locally: names and repeated terms become hints, not instructions to recite the outline. The text translator still receives relevant note excerpts through the existing retrieval workflow. Economy still requires its existing explicit notes-sharing choice. Speech generation remains optional and separate from recognition. No new data-sharing opt-in is enabled.
+Selected sermon notes contribute a bounded vocabulary list to both recognizers. Extraction runs locally: common English and Russian connecting words are removed before ranking names and repeated terms, so bilingual notes do not spend the hint budget on sentence starters. The remaining words are hints, not instructions to recite the outline. This filtering does not itself establish recognition accuracy. The text translator still receives relevant note excerpts through the existing retrieval workflow. Economy still requires its existing explicit notes-sharing choice. Speech generation remains optional and separate from recognition. No new data-sharing opt-in is enabled.
 
 ## Storage and server configuration
 
