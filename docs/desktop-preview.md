@@ -15,7 +15,7 @@ From a clean checkout of the intended commit:
 pnpm install --frozen-lockfile
 pnpm --filter @multilinguum/protocol build
 python3 scripts/macos-preview.py prepare
-pnpm --filter @multilinguum/operator exec tauri build --ci --config src-tauri/target/preview-config.json
+pnpm --filter @multilinguum/operator exec tauri build --ci --bundles app,dmg --config src-tauri/target/preview-config.json
 python3 scripts/macos-preview.py verify --architecture arm64
 ```
 

@@ -49,7 +49,7 @@ jobs:
       - name: Embed exact source and select ad-hoc preview signing
         run: python3 scripts/macos-preview.py prepare
       - name: Build the actual app and installer
-        run: pnpm --filter @multilinguum/operator exec tauri build --ci --config src-tauri/target/preview-config.json
+        run: pnpm --filter @multilinguum/operator exec tauri build --ci --bundles app,dmg --config src-tauri/target/preview-config.json
       - name: Verify the installer and mounted application
         run: python3 scripts/macos-preview.py verify --architecture '${{ matrix.architecture }}'
       - uses: actions/upload-artifact@v4
