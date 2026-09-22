@@ -1,3 +1,8 @@
+import {
+  SlideAutomation,
+  type SlideAutomationBridge,
+  type SlideTranslationStatus,
+} from './slideAutomation';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
   ContextDocument,
@@ -28,6 +33,7 @@ export interface ControlLease {
 }
 export interface ManagedOperatorOptions extends ServicePlanOptions {
   museSettings?: MuseSettingsAccess;
+  slideAutomation?: SlideAutomationBridge;
   initialLease: ControlLease;
   requestAccess(): Promise<ControlLease>;
   requestArchiveAccess?(): Promise<ControlLease>;
@@ -52,6 +58,7 @@ export function ManagedOperator({
   saveServicePlan,
   preferredServiceId,
   museSettings,
+  slideAutomation,
 }: ManagedOperatorOptions) {
   const [lease, setLease] = useState(initialLease);
   const [accessError, setAccessError] = useState('');
@@ -79,6 +86,10 @@ export function ManagedOperator({
   const [notesError, setNotesError] = useState('');
   const [captureRequested, setCaptureRequested] = useState(false);
   const [deviceId, setDeviceId] = useState<string>();
+  const [automationSessionId, setAutomationSessionId] = useState<string>();
+  const [automationStatus, setAutomationStatus] = useState<SlideTranslationStatus>({
+    phase: 'idle',
+  });
   const [captions, setCaptions] = useState<TranscriptSegment[]>([]);
   const subscription = useRef<ReturnType<typeof subscribe> | undefined>(undefined);
   const connection = useMemo(() => ({ baseUrl: lease.apiBase, token: lease.token }), [lease]);
@@ -94,6 +105,7 @@ export function ManagedOperator({
     sourceLanguage: source,
     translationProfile: profileId,
     speechEnabled: speech,
+    shareSermonNotesWithEconomy: useNotes && profileId === 'economy' && shareNotes,
     contextDocumentIds: useNotes ? noteIds : [],
   };
   const planReady =
@@ -114,6 +126,7 @@ export function ManagedOperator({
       setSpeech(plan.settings.speechEnabled);
       setNoteIds(plan.settings.contextDocumentIds);
       setUseNotes(plan.settings.contextDocumentIds.length > 0);
+      setShareNotes(plan.settings.shareSermonNotesWithEconomy === true);
     }
   }
   async function reloadPlans() {
@@ -170,11 +183,204 @@ export function ManagedOperator({
     operatorUrl('client/pcm-worklet.js', lease.apiBase).href,
   );
   const capture = useAudioStreamer(
-    captureRequested && live && !expired,
-    session?.id,
+    captureRequested && (live || Boolean(automationSessionId)) && !expired,
+    automationSessionId || session?.id,
     connection,
     audio.subscribePcm,
+    live,
   );
+
+  const cueController = useRef<SlideAutomation | undefined>(undefined);
+  const inputState = useRef({ audio, capture });
+  inputState.current = { audio, capture };
+  const meterFrames = useRef(0);
+  useEffect(() => {
+    const off = audio.subscribePcm(() => {
+      meterFrames.current++;
+    });
+    return () => {
+      off();
+    };
+  }, [audio.subscribePcm]);
+  useEffect(() => {
+    if (!slideAutomation) return;
+    let closed = false;
+    void slideAutomation.getInput().then((input) => {
+      if (input && !closed) setDeviceId(input.id);
+    });
+    const disconnect = () => {
+      setCaptureRequested(false);
+      setAutomationSessionId(undefined);
+    };
+    const controller = new SlideAutomation({
+      report: (status) => {
+        if (!closed) {
+          setAutomationStatus(status);
+          slideAutomation.report(status);
+        }
+      },
+      disconnect,
+      prepare: async (command, cancelled) => {
+        if (!loadServicePlans) throw new Error('Update Community to use translation cues.');
+        const input = await slideAutomation.getInput();
+        if (!input || ['default', 'communications'].includes(input.id))
+          throw new Error(
+            'Choose and save the mixer or incoming audio device in Translation controls first.',
+          );
+        const available = await navigator.mediaDevices.enumerateDevices();
+        const exact = available.find(
+          (device) =>
+            device.kind === 'audioinput' &&
+            device.deviceId === input.id &&
+            (!device.label || device.label === input.label),
+        );
+        const matches = available.filter(
+          (device) =>
+            device.kind === 'audioinput' &&
+            device.label === input.label &&
+            !['default', 'communications'].includes(device.deviceId),
+        );
+        const chosen = exact || (matches.length === 1 ? matches[0] : undefined);
+        if (!chosen)
+          throw new Error(
+            'The saved mixer input is unavailable. Reconnect it or choose an input in Translation controls.',
+          );
+        const plan = (await loadServicePlans(command.serviceId)).services.find(
+          (value) => value.id === command.serviceId,
+        );
+        if (
+          !plan?.settings ||
+          !plan.revision ||
+          plan.stale ||
+          plan.serviceRevision !== command.serviceRevision
+        ) {
+          throw new Error(
+            'Save translation settings for this service, then load the current service in SyncShow.',
+          );
+        }
+        if (cancelled()) throw new Error('Translation preparation was cancelled.');
+        const settings = plan.settings;
+        if (
+          settings.translationProfile === 'economy' &&
+          settings.contextDocumentIds.length &&
+          !settings.shareSermonNotesWithEconomy
+        )
+          throw new Error('Confirm Economy note sharing in this service’s translation settings.');
+        const current = await api.current(latestConnection.current);
+        if (current.session && !['completed', 'failed'].includes(current.session.state)) {
+          throw new Error(
+            'Another translation session is already active. Open Translation controls to review it.',
+          );
+        }
+        setServiceId(plan.id);
+        setPlans((values) => [...values.filter((value) => value.id !== plan.id), plan]);
+        applyPlan(plan);
+        const created = await api.create(latestConnection.current, {
+          serviceReference: serviceReference(plan, plan, settings),
+          transcriptionProvider: settings.transcriptionProvider ?? 'auto',
+          sourceLanguage: settings.sourceLanguage,
+          translationProfile: settings.translationProfile,
+          targets: (['en', 'ru'] as const).map((language) => ({
+            id: `channel-${language}`,
+            targetLanguage: language,
+            translationProvider:
+              language === settings.sourceLanguage ? 'deterministic' : 'openai-cascade',
+            voiceMode: language === settings.sourceLanguage ? 'source' : 'natural',
+            fallbackOrder: ['mute'],
+            muted: false,
+            speechEnabled: language !== settings.sourceLanguage && settings.speechEnabled,
+          })),
+          processingNode: {
+            id: 'community-processor',
+            name: 'Church translation',
+            mode: 'remote',
+            endpoint: latestConnection.current.baseUrl,
+            identityFingerprint: 'community-authorized-processor',
+          },
+          archivePolicy: {
+            retentionDays: 30,
+            retainIndefinitely: false,
+            recordSource: true,
+            recordTranslations: true,
+          },
+          contextDocumentIds: settings.contextDocumentIds,
+          shareSermonNotesWithEconomy: settings.shareSermonNotesWithEconomy === true,
+          expectedDurationMinutes: 120,
+          budgetWarningUsd: 20,
+        });
+        if (cancelled()) return created.id;
+        meterFrames.current = 0;
+        setDeviceId(chosen.deviceId);
+        setSnapshot((previous) => ({ ...previous, session: created }));
+        setAutomationSessionId(created.id);
+        setCaptureRequested(true);
+        return created.id;
+      },
+      ready: async (_id, cancelled) => {
+        const deadline = Date.now() + 25000;
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        // Wait for actual local PCM and the server's provider-ready acknowledgement.
+        while (!cancelled() && !closed) {
+          const current = inputState.current;
+          if (current.audio.error || current.capture.error)
+            throw new Error(current.audio.error || current.capture.error);
+          if (meterFrames.current > 0 && current.capture.streaming) return;
+          if (Date.now() > deadline)
+            throw new Error(
+              'The selected audio input or translation provider did not become ready.',
+            );
+          await new Promise((resolve) => window.setTimeout(resolve, 50));
+        }
+      },
+      start: async (id) => {
+        const current = await api.current(latestConnection.current);
+        const started =
+          current.session?.id === id && current.session.state === 'live'
+            ? current.session
+            : await api.start(latestConnection.current, id);
+        setSnapshot((previous) => ({ ...previous, session: started }));
+      },
+      stop: async (id) => {
+        const current = await api.current(latestConnection.current);
+        if (current.session?.id !== id || ['completed', 'failed'].includes(current.session.state))
+          return;
+        const stopped = await api.stop(latestConnection.current, id);
+        setSnapshot((previous) => ({ ...previous, session: stopped.session }));
+      },
+    });
+    cueController.current = controller;
+    const unsubscribe = slideAutomation.onCommand((command) => controller.command(command));
+    return () => {
+      closed = true;
+      unsubscribe();
+      controller.dispose();
+      if (cueController.current === controller) cueController.current = undefined;
+      disconnect();
+    };
+  }, [slideAutomation, loadServicePlans]);
+  useEffect(() => {
+    if (
+      automationSessionId &&
+      ['ready', 'live'].includes(automationStatus.phase) &&
+      (audio.error || capture.error)
+    ) {
+      cueController.current?.fail(audio.error || capture.error || 'Audio input disconnected.');
+    }
+  }, [automationSessionId, automationStatus.phase, audio.error, capture.error]);
+  // Store a named input after explicit selection; never save a system-default alias.
+  useEffect(() => {
+    const selected = audio.devices.find((device) => device.id === deviceId);
+    if (
+      slideAutomation &&
+      selected &&
+      !['default', 'communications'].includes(selected.id) &&
+      !/^Input \d+$/.test(selected.label)
+    ) {
+      void slideAutomation
+        .saveInput(selected)
+        .catch(() => setError('Could not save the selected mixer input.'));
+    }
+  }, [slideAutomation, audio.devices, deviceId]);
 
   useEffect(() => {
     let stopped = false;
@@ -283,7 +489,7 @@ export function ManagedOperator({
   }, [lease.apiBase]);
   useEffect(() => subscription.current?.renew(lease.token), [lease.token]);
   useEffect(() => setCaptions([]), [session?.id]);
-  useEffect(() => setShareNotes(false), [session?.id, profileId, noteIds]);
+
   useEffect(() => {
     if (capture.error || audio.error) {
       setError(capture.error || audio.error || 'Audio input disconnected.');
@@ -517,8 +723,8 @@ export function ManagedOperator({
                 </button>
               </div>
               <p className="hint">
-                Saving does not start translation or connect a microphone. Economy’s note-sharing
-                choice is made for each session.
+                Saving does not start translation or open an audio input. Economy’s note-sharing
+                choice is saved only for this service and these selected notes.
               </p>
             </section>
           )}
@@ -539,7 +745,10 @@ export function ManagedOperator({
             <select
               value={locked && !selectedProfile ? 'legacy' : (selectedProfile?.id ?? profileId)}
               disabled={locked || busy || planBusy}
-              onChange={(event) => setProfileId(event.target.value as TranslationProfileId)}
+              onChange={(event) => {
+                setShareNotes(false);
+                setProfileId(event.target.value as TranslationProfileId);
+              }}
             >
               {locked && !selectedProfile && (
                 <option value="legacy">Existing server configuration</option>
@@ -681,6 +890,7 @@ export function ManagedOperator({
                             ...previous.filter((item) => item.id !== document.id),
                             document,
                           ]);
+                          setShareNotes(false);
                           setNoteIds((previous) =>
                             previous.length < 8
                               ? [...new Set([...previous, document.id])]
@@ -706,13 +916,14 @@ export function ManagedOperator({
                         planBusy ||
                         (!noteIds.includes(document.id) && noteIds.length >= 8)
                       }
-                      onChange={(event) =>
+                      onChange={(event) => {
+                        setShareNotes(false);
                         setNoteIds((previous) =>
                           event.target.checked
                             ? [...previous, document.id]
                             : previous.filter((id) => id !== document.id),
-                        )
-                      }
+                        );
+                      }}
                     />
                     {document.filename}
                   </label>
@@ -825,9 +1036,16 @@ export function ManagedOperator({
         </section>
         <section className="card">
           <h2>Mixer feed</h2>
+          {slideAutomation && (
+            <p role={automationStatus.phase === 'error' ? 'alert' : 'status'}>
+              Slide cues: {automationStatus.phase}. {automationStatus.message || ''}
+            </p>
+          )}
           <p className="input-status">
             {capture.streaming
-              ? 'Sending audio from this computer'
+              ? live
+                ? 'Sending the selected audio feed'
+                : 'Input and providers ready · waiting for Start Translate'
               : captureRequested
                 ? 'Connecting this input…'
                 : snapshot.capture.ready
@@ -837,7 +1055,7 @@ export function ManagedOperator({
                     : 'No mixer connected'}
           </p>
           <label>
-            Audio device
+            Mixer / incoming audio device
             <select
               value={deviceId ?? ''}
               disabled={captureRequested}

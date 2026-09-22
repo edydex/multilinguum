@@ -7,12 +7,15 @@ export function useAudioStreamer(
   sessionId: string | undefined,
   connection: OperatorConnection,
   subscribePcm: (listener: (frame: CapturedPcmFrame) => void) => () => void,
+  sendAudio = true,
 ) {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string>();
   const token = useRef(connection.token);
   const currentSocket = useRef<WebSocket | undefined>(undefined);
   token.current = connection.token;
+  const transmitting = useRef(sendAudio);
+  transmitting.current = sendAudio;
 
   // Renew authorization in place: changing a short-lived lease must not reopen the mixer.
   useEffect(() => {
@@ -58,7 +61,7 @@ export function useAudioStreamer(
       if (event.type !== 'capture-ready' || event.sessionId !== sessionId || unsubscribePcm) return;
       window.clearTimeout(timeout);
       unsubscribePcm = subscribePcm((frame) => {
-        if (socket.readyState !== WebSocket.OPEN) return;
+        if (!transmitting.current || socket.readyState !== WebSocket.OPEN) return;
         // Never accumulate stale sermon audio when a connection cannot keep up.
         if (socket.bufferedAmount > 192000) {
           fail(

@@ -103,6 +103,7 @@ export function useAudioMeter(
   }, []);
 
   useEffect(() => {
+    setError(undefined);
     if (!active) {
       setLevelDb(-60);
       setActiveChannel(0);

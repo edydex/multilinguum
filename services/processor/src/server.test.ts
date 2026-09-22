@@ -1332,3 +1332,106 @@ it('serves only current live PCM and revokes clip URLs when voice turns off or a
     socket.terminate();
   }
 });
+
+it('cue commands cannot start or stop a replaced session', async () => {
+  const server = await testServer();
+  const created = await server.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    headers: headers(),
+    payload: sessionRequest(),
+  });
+  const id = created.json().id;
+  const other = '00000000-0000-4000-8000-000000000000';
+  for (const action of ['start', 'stop']) {
+    const rejected = await server.inject({
+      method: 'POST',
+      url: `/api/sessions/current/${action}`,
+      headers: headers(),
+      payload: { expectedSessionId: other },
+    });
+    expect(rejected.statusCode).toBe(409);
+  }
+  expect(
+    (await server.inject({ url: '/api/sessions/current', headers: headers() })).json().session
+      .state,
+  ).toBe('preflight');
+  expect(
+    (
+      await server.inject({
+        method: 'POST',
+        url: '/api/sessions/current/start',
+        headers: headers(),
+        payload: { expectedSessionId: id },
+      })
+    ).statusCode,
+  ).toBe(200);
+  expect(
+    (
+      await server.inject({
+        method: 'POST',
+        url: '/api/sessions/current/stop',
+        headers: headers(),
+        payload: { expectedSessionId: id },
+      })
+    ).statusCode,
+  ).toBe(200);
+});
+
+it('prewarms provider connections but discards incoming audio until the exact session is live', async () => {
+  const { RealtimeCapturePipeline } = await import('./realtime-capture-pipeline.js');
+  let finishWarmup!: () => void;
+  vi.spyOn(RealtimeCapturePipeline.prototype, 'start').mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        finishWarmup = resolve;
+      }),
+  );
+  vi.spyOn(RealtimeCapturePipeline.prototype, 'close').mockResolvedValue(undefined);
+  const push = vi.spyOn(RealtimeCapturePipeline.prototype, 'push').mockImplementation(() => {});
+  const server = await testServer({ OPENAI_API_KEY: 'test-key-never-sent-to-provider' });
+  const created = await server.inject({
+    method: 'POST',
+    url: '/api/sessions',
+    headers: headers(),
+    payload: sessionRequest(),
+  });
+  expect(created.statusCode).toBe(200);
+  const id = created.json().id;
+  const socket = await server.injectWS(`/api/capture/audio?sessionId=${id}`, {
+    headers: { 'sec-websocket-protocol': `multilinguum-auth.${controlToken}` },
+  });
+  try {
+    expect(finishWarmup).toBeTypeOf('function');
+    const message = once(socket, 'message');
+    finishWarmup();
+    const ready = JSON.parse(String((await message)[0]));
+    expect(ready).toEqual({ type: 'capture-ready', sessionId: id });
+    const packet = Buffer.alloc(20);
+    packet.writeDoubleLE(Date.now(), 4);
+    packet.writeUInt32LE(2, 12);
+    socket.send(packet);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(push).not.toHaveBeenCalled();
+    const started = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/start',
+      headers: headers(),
+      payload: { expectedSessionId: id },
+    });
+    expect(started.statusCode).toBe(200);
+    socket.send(packet);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(push).toHaveBeenCalledTimes(1);
+    const stopped = await server.inject({
+      method: 'POST',
+      url: '/api/sessions/current/stop',
+      headers: headers(),
+      payload: { expectedSessionId: id },
+    });
+    expect(stopped.statusCode).toBe(200);
+  } finally {
+    socket.terminate();
+    vi.restoreAllMocks();
+  }
+});
