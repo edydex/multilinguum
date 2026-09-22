@@ -112,3 +112,42 @@ it('backing up before Start stops the live session and prepares afresh', async (
   await tick();
   expect(f.events).toContain('stop:session-2');
 });
+
+it('a disconnected live input stops its owned session and requires a fresh preparation on retry', async () => {
+  const f = fixture(),
+    controller = new SlideAutomation(f.io);
+  controller.command(command('live'));
+  await tick();
+  controller.fail('Cable disconnected');
+  await tick();
+  expect(f.events).toContain('stop:session-1');
+  expect(f.status.at(-1)).toBe('error');
+  controller.command(command('live'));
+  await tick();
+  expect(f.events).toContain('start:session-2');
+  expect(f.status.at(-1)).toBe('live');
+});
+
+it('a failed Stop is retried before a damaged live session can be replaced', async () => {
+  const f = fixture(),
+    controller = new SlideAutomation(f.io);
+  controller.command(command('live'));
+  await tick();
+  f.io.stop = async () => {
+    throw new Error('Offline');
+  };
+  controller.fail('Cable disconnected');
+  await tick();
+  f.io.stop = async (id) => {
+    f.events.push(`stop:${id}`);
+  };
+  controller.command(command('live'));
+  await tick();
+  expect(f.events.slice(-5)).toEqual([
+    'disconnect',
+    'stop:session-1',
+    'prepare',
+    'ready',
+    'start:session-2',
+  ]);
+});

@@ -190,6 +190,7 @@ export function ManagedOperator({
     live,
   );
 
+  const cueController = useRef<SlideAutomation | undefined>(undefined);
   const inputState = useRef({ audio, capture });
   inputState.current = { audio, capture };
   const meterFrames = useRef(0);
@@ -347,14 +348,25 @@ export function ManagedOperator({
         setSnapshot((previous) => ({ ...previous, session: stopped.session }));
       },
     });
+    cueController.current = controller;
     const unsubscribe = slideAutomation.onCommand((command) => controller.command(command));
     return () => {
       closed = true;
       unsubscribe();
       controller.dispose();
+      if (cueController.current === controller) cueController.current = undefined;
       disconnect();
     };
   }, [slideAutomation, loadServicePlans]);
+  useEffect(() => {
+    if (
+      automationSessionId &&
+      ['ready', 'live'].includes(automationStatus.phase) &&
+      (audio.error || capture.error)
+    ) {
+      cueController.current?.fail(audio.error || capture.error || 'Audio input disconnected.');
+    }
+  }, [automationSessionId, automationStatus.phase, audio.error, capture.error]);
   // Store a named input after explicit selection; never save a system-default alias.
   useEffect(() => {
     const selected = audio.devices.find((device) => device.id === deviceId);
