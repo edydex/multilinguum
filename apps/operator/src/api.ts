@@ -131,16 +131,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
-  start: (connection: OperatorConnection) =>
+  start: (connection: OperatorConnection, expectedSessionId?: string) =>
     request<ServiceSession>(connection, '/api/sessions/current/start', {
       method: 'POST',
-      body: '{}',
+      body: JSON.stringify({ expectedSessionId }),
     }),
-  stop: (connection: OperatorConnection) =>
+  stop: (connection: OperatorConnection, expectedSessionId?: string) =>
     request<{ session: ServiceSession; archive: ArchiveManifest }>(
       connection,
       '/api/sessions/current/stop',
-      { method: 'POST', body: '{}' },
+      { method: 'POST', body: JSON.stringify({ expectedSessionId }) },
     ),
   channel: (connection: OperatorConnection, channelId: string, body: unknown) =>
     request<ChannelHealth>(connection, `/api/sessions/current/channels/${channelId}`, {

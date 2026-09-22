@@ -518,7 +518,7 @@ export async function buildServer(config: ProcessorConfig) {
       !['master', 'session-control'].includes(access.scope) ||
       !session ||
       session.id !== query.sessionId ||
-      session.state !== 'live'
+      !['live', 'preflight'].includes(session.state)
     ) {
       socket.close(1008, 'Unauthorized or inactive session');
       return;
@@ -589,6 +589,8 @@ export async function buildServer(config: ProcessorConfig) {
       try {
         if (authorization.consume(message, isBinary)) return;
         if (!acceptingFrames || !authorization.valid()) return;
+        // Prewarm provider connections without sending, recording or transcribing audio.
+        if (engine.current()?.id !== session.id || engine.current()?.state !== 'live') return;
         if (!isBinary) throw new Error('Capture frames must be binary.');
         const packet = Buffer.isBuffer(message) ? message : Buffer.from(message as ArrayBuffer);
         if (packet.byteLength < 16) throw new Error('Capture frame header is incomplete.');
@@ -604,7 +606,13 @@ export async function buildServer(config: ProcessorConfig) {
         void ready
           .then(() => {
             if (startupError) throw startupError;
-            if (acceptingFrames && authorization.valid()) pipeline.push(frame, capturedAt);
+            if (
+              acceptingFrames &&
+              authorization.valid() &&
+              engine.current()?.id === session.id &&
+              engine.current()?.state === 'live'
+            )
+              pipeline.push(frame, capturedAt);
           })
           .catch((error) =>
             socket.close(
@@ -710,11 +718,27 @@ export async function buildServer(config: ProcessorConfig) {
     health: engine.health(),
     capture: { connected: Boolean(activeCapture), ready: Boolean(activeCapture?.ready) },
   }));
-  app.post('/api/sessions/current/start', { preHandler: requireSessionControl }, async () =>
-    changeSession(() => engine.start()),
+  const requireExpectedSession = (body: unknown) => {
+    const { expectedSessionId } = z
+      .object({ expectedSessionId: z.string().uuid().optional() })
+      .strict()
+      .parse(body ?? {});
+    if (expectedSessionId && engine.current()?.id !== expectedSessionId) {
+      throw Object.assign(
+        new Error('The translation session changed. This cue cannot control another session.'),
+        { statusCode: 409 },
+      );
+    }
+  };
+  app.post('/api/sessions/current/start', { preHandler: requireSessionControl }, async (request) =>
+    changeSession(() => {
+      requireExpectedSession(request.body);
+      return engine.start();
+    }),
   );
-  app.post('/api/sessions/current/stop', { preHandler: requireSessionControl }, async () =>
+  app.post('/api/sessions/current/stop', { preHandler: requireSessionControl }, async (request) =>
     changeSession(async () => {
+      requireExpectedSession(request.body);
       const capture = activeCapture;
       if (capture) {
         const draining = capture.close();

@@ -3,6 +3,7 @@ export interface TranslationSettings {
   transcriptionProvider?: 'auto' | 'muse' | 'openai';
   sourceLanguage: 'en' | 'ru';
   translationProfile: 'quality' | 'economy';
+  shareSermonNotesWithEconomy?: boolean;
   speechEnabled: boolean;
   contextDocumentIds: string[];
 }
@@ -38,6 +39,7 @@ export function sameSettings(
     left.translationProfile === right.translationProfile &&
     (left.transcriptionProvider ?? 'auto') === (right.transcriptionProvider ?? 'auto') &&
     left.speechEnabled === right.speechEnabled &&
+    Boolean(left.shareSermonNotesWithEconomy) === Boolean(right.shareSermonNotesWithEconomy) &&
     JSON.stringify([...left.contextDocumentIds].sort()) ===
       JSON.stringify([...right.contextDocumentIds].sort()),
   );
