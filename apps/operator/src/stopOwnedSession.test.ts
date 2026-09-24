@@ -23,10 +23,26 @@ describe('confirmed cue stop', () => {
       const io = {
         current: vi.fn().mockResolvedValue({ session: session('ours', state) }),
         stop: vi.fn().mockRejectedValue(error),
+        wait: async () => {},
       };
       await expect(stopOwnedSession('ours', io)).rejects.toBe(error);
     },
   );
+  it('waits for the owned session to finish draining after the proxy times out', async () => {
+    const completed = session('ours', 'completed');
+    const io = {
+      current: vi
+        .fn()
+        .mockResolvedValueOnce({ session: session('ours', 'live') })
+        .mockResolvedValueOnce({ session: session('ours', 'stopping') })
+        .mockResolvedValue({ session: completed }),
+      stop: vi.fn().mockRejectedValue(new Error('500')),
+      wait: vi.fn(async () => {}),
+    };
+    expect(await stopOwnedSession('ours', io)).toBe(completed);
+    expect(io.stop).toHaveBeenCalledOnce();
+    expect(io.wait).toHaveBeenCalledOnce();
+  });
   it('does not treat a replacement session as confirmation', async () => {
     const error = new Error('Stop failed');
     const io = {

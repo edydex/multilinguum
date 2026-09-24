@@ -7,6 +7,7 @@ export async function stopOwnedSession(
   io: {
     current(): Promise<{ session?: ServiceSession }>;
     stop(id: string): Promise<{ session: ServiceSession }>;
+    wait?: () => Promise<void>;
   },
 ): Promise<ServiceSession | undefined> {
   const current = await io.current();
@@ -17,9 +18,15 @@ export async function stopOwnedSession(
   } catch (error) {
     // An unavailable status endpoint, a different session, or a nonterminal
     // state cannot prove that stopping succeeded. Preserve the original error.
-    const confirmed = await io.current().catch(() => undefined);
-    if (confirmed?.session?.id === id && confirmed.session.state === 'completed')
-      return confirmed.session;
+    for (let attempt = 0; attempt <= 10; attempt++) {
+      const confirmed = await io.current().catch(() => undefined);
+      if (confirmed?.session?.id !== id) break;
+      if (confirmed.session.state === 'completed') return confirmed.session;
+      if (confirmed.session.state === 'failed' || attempt === 10) break;
+      // The HTTP proxy can time out while the processor is still draining the
+      // last audio. Give that same session a bounded window to finish.
+      await (io.wait?.() ?? new Promise((resolve) => setTimeout(resolve, 1000)));
+    }
     throw error;
   }
 }
