@@ -76,24 +76,29 @@ export function CaptionPanel({
     [caption?.final, clock, narrated, video, sourceNow, sessionStartedAt],
   );
   const anchor = narrated && !video ? narratedAnchorSequence(final, clock) : final.at(-1)?.sequence;
+  const liveText = caption?.live && eligible(caption.live) ? caption.live.text : undefined;
+  const latestFinalText = final.at(-1)?.text;
   const scroll = useCallback(() => {
     if (!viewport.current) return;
-    const target = anchor === undefined ? undefined : segments.current.get(anchor);
+    const target =
+      narrated && !video && anchor !== undefined ? segments.current.get(anchor) : undefined;
     programmaticUntil.current = Date.now() + 500;
     viewport.current.scrollTo({
       top: target
         ? Math.max(0, target.offsetTop - viewport.current.clientHeight * 0.4)
         : viewport.current.scrollHeight,
-      behavior: 'smooth',
+      // Streaming text can grow several times a second. Restarting a smooth
+      // animation on every word leaves the newest lines perpetually behind.
+      behavior: target ? 'smooth' : 'instant',
     });
-  }, [anchor]);
+  }, [anchor, narrated, video]);
   useLayoutEffect(() => {
-    if (follow.current) scroll();
-  }, [anchor, language, visible, scroll]);
-  useEffect(() => {
     follow.current = true;
     setFollowing(true);
   }, [language, caption?.sessionId]);
+  useLayoutEffect(() => {
+    if (follow.current) scroll();
+  }, [anchor, language, visible, liveText, latestFinalText, scroll]);
   return (
     <section className={`captions ${visible ? '' : 'collapsed'}`}>
       <div className="caption-title">
