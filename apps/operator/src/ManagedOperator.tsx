@@ -264,7 +264,7 @@ export function ManagedOperator({
         if (cancelled()) throw new Error('Translation preparation was cancelled.');
         const settings = cue
           ? {
-              transcriptionProvider: 'auto' as const,
+              transcriptionProvider: plan.settings?.transcriptionProvider ?? ('auto' as const),
               translationProfile: plan.settings?.translationProfile || ('quality' as const),
               contextDocumentIds: plan.stale ? [] : plan.settings?.contextDocumentIds || [],
               shareSermonNotesWithEconomy:

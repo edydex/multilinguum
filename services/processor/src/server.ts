@@ -547,6 +547,12 @@ export async function buildServer(config: ProcessorConfig) {
       session,
       realtimeTranscriberFactory(session),
       realtimeTranslationFactory,
+      () => {
+        // End capture once on a fatal source failure. Otherwise every incoming
+        // PCM frame repeats the same error and leaves the operator falsely live.
+        if (socket.readyState === socket.OPEN)
+          socket.close(1011, 'Speech recognition disconnected. Reconnect capture to continue.');
+      },
     );
     let startupError: Error | undefined;
     const ready = pipeline.start().catch((error) => {

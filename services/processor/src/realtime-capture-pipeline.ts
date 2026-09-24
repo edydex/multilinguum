@@ -119,12 +119,14 @@ export class RealtimeCapturePipeline {
   #lastPauseCommitMs = 0;
   #cascadeFlushTimer: ReturnType<typeof setTimeout> | undefined;
   #started = false;
+  #sourceFailure: Error | undefined;
 
   constructor(
     engine: SessionEngine,
     session: ServiceSession,
     transcriber: Transcriber,
     channelFactory: RealtimeTranslationChannelFactory,
+    private readonly onSourceFailure: (error: Error) => void = () => undefined,
   ) {
     this.#engine = engine;
     this.#session = session;
@@ -137,9 +139,7 @@ export class RealtimeCapturePipeline {
     this.#started = true;
     this.#unsubscribers.push(
       this.#transcriber.onSegment((segment) => this.#receiveSourceTranscript(segment)),
-      this.#transcriber.onError((error) =>
-        this.#engine.reportChannelFailure(this.#sourceChannelId(), error),
-      ),
+      this.#transcriber.onError((error) => this.#failSource(error)),
     );
     await this.#transcriber.start(this.#session);
     const directConfigs = this.#session.targets.filter(
@@ -172,6 +172,7 @@ export class RealtimeCapturePipeline {
 
   push(frame: Uint8Array, capturedAtUnixMs = Date.now()): void {
     if (!this.#started) throw new Error('Realtime capture pipeline is not started.');
+    if (this.#sourceFailure) throw this.#sourceFailure;
     if (frame.byteLength % bytesPerSample !== 0) {
       throw new Error('PCM frame is not 16-bit aligned.');
     }
@@ -201,6 +202,7 @@ export class RealtimeCapturePipeline {
     this.#latestCapturedAtUnixMs = capturedAtUnixMs;
     this.#inputChain = this.#inputChain
       .then(async () => {
+        if (this.#sourceFailure) return;
         this.#appendPendingSource(frame);
         await Promise.all([
           this.#transcriber.pushAudio(chunk),
@@ -212,11 +214,15 @@ export class RealtimeCapturePipeline {
         await this.#flushCompleteSourceChunks(capturedAtUnixMs);
       })
       .catch((error) => {
-        this.#engine.reportChannelFailure(
-          this.#sourceChannelId(),
-          error instanceof Error ? error : new Error(String(error)),
-        );
+        this.#failSource(error instanceof Error ? error : new Error(String(error)));
       });
+  }
+
+  #failSource(error: Error): void {
+    if (this.#sourceFailure) return;
+    this.#sourceFailure = error;
+    this.#engine.reportChannelFailure(this.#sourceChannelId(), error);
+    this.onSourceFailure(error);
   }
 
   useCascadeForChannel(channelId: string): void {

@@ -88,16 +88,40 @@ describe('Muse streaming contract', () => {
     });
     await adapter.pushAudio(chunk());
     adapter.flushAudio();
-    expect(sockets[0]!.sent).toHaveLength(2);
-    expect(sockets[0]!.sent[1]).toBeInstanceOf(Uint8Array);
+    expect(sockets).toHaveLength(2);
+    expect(sockets[0]!.sent.every((frame) => typeof frame === 'string')).toBe(true);
+    expect(sockets[1]!.sent[1]).toBeInstanceOf(Uint8Array);
     await adapter.stop();
-    expect(JSON.parse(sockets[0]!.sent.at(-1) as string)).toEqual({ type: 'endStream' });
+    expect(JSON.parse(sockets.at(-1)!.sent.at(-1) as string)).toEqual({ type: 'endStream' });
+  });
+  it('can wait on the preceding slide without keeping a paid recognition stream idle', async () => {
+    vi.useFakeTimers();
+    const { adapter, sockets, segments, errors } = setup();
+    await adapter.start(session);
+    expect(sockets[0]!.readyState).toBe(3);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(errors).toEqual([]);
+    await adapter.pushAudio(chunk(0));
+    expect(sockets).toHaveLength(2);
+    const live = sockets[1]!;
+    // Delayed callbacks from the preflight socket cannot poison the live stream.
+    sockets[0]!.emit('error', new Error('late preflight close'));
+    live.receive({ type: 'speechStart', turnId: 1, audioProcessedMs: 0 });
+    live.receive({
+      type: 'speechComplete',
+      turnId: 1,
+      transcript: 'Ready.',
+      audioProcessedMs: 100,
+    });
+    expect(segments[0]).toMatchObject({ text: 'Ready.', sourceStartMs: 0 });
+    expect(errors).toEqual([]);
+    await adapter.stop();
   });
   it('replaces cumulative partials and orders overlapping completed turns using their IDs', async () => {
     const { adapter, sockets, segments } = setup();
     await adapter.start(session);
     await adapter.pushAudio(chunk(500));
-    const socket = sockets[0]!;
+    const socket = sockets.at(-1)!;
     socket.receive({ type: 'speechStart', turnId: 11, audioProcessedMs: 10 });
     socket.receive({ type: 'transcript', transcript: 'Grace', audioProcessedMs: 20 });
     socket.receive({ type: 'transcript', transcript: 'Grace and peace', audioProcessedMs: 30 });
@@ -149,7 +173,10 @@ describe('Muse streaming contract', () => {
   it('does not disclose request data or credentials in provider errors', async () => {
     const { adapter, sockets, errors } = setup();
     await adapter.start(session);
-    sockets[0]!.receive({ type: 'error', message: 'PRIVATE_TOKEN_SENTINEL sermon-private-notes' });
+    await adapter.pushAudio(chunk());
+    sockets
+      .at(-1)!
+      .receive({ type: 'error', message: 'PRIVATE_TOKEN_SENTINEL sermon-private-notes' });
     await expect(adapter.pushAudio(chunk())).rejects.toThrow('Muse transcription failed');
     await adapter.stop();
     expect(errors.join()).not.toMatch(/PRIVATE_TOKEN|sermon-private-notes/);
@@ -157,7 +184,8 @@ describe('Muse streaming contract', () => {
   it('drains final turns at stop instead of treating speechEnd as the transcript', async () => {
     const { adapter, sockets, segments } = setup();
     await adapter.start(session);
-    const socket = sockets[0]!;
+    await adapter.pushAudio(chunk());
+    const socket = sockets.at(-1)!;
     socket.drain = false;
     socket.receive({ type: 'speechStart', turnId: 1, audioProcessedMs: 0 });
     socket.receive({ type: 'speechEnd', turnId: 1, audioProcessedMs: 100 });
@@ -176,17 +204,17 @@ describe('Muse streaming contract', () => {
     const { adapter, sockets, segments } = setup({ rotateAfterMs: 100 });
     await adapter.start(session);
     await adapter.pushAudio(chunk(400));
-    sockets[0]!.receive({ type: 'speechStart', turnId: 1, audioProcessedMs: 0 });
-    sockets[0]!.receive({
+    sockets.at(-1)!.receive({ type: 'speechStart', turnId: 1, audioProcessedMs: 0 });
+    sockets.at(-1)!.receive({
       type: 'speechComplete',
       turnId: 1,
       transcript: 'First.',
       audioProcessedMs: 100,
     });
     await adapter.pushAudio(chunk(500));
-    expect(sockets).toHaveLength(2);
-    sockets[1]!.receive({ type: 'speechStart', turnId: 1, audioProcessedMs: 0 });
-    sockets[1]!.receive({
+    expect(sockets).toHaveLength(3);
+    sockets.at(-1)!.receive({ type: 'speechStart', turnId: 1, audioProcessedMs: 0 });
+    sockets.at(-1)!.receive({
       type: 'speechComplete',
       turnId: 1,
       transcript: 'Second.',
@@ -203,8 +231,9 @@ describe('Muse streaming contract', () => {
     vi.useFakeTimers();
     const { adapter, sockets, errors } = setup({ drainMs: 20 });
     await adapter.start(session);
-    sockets[0]!.drain = false;
-    sockets[0]!.receive({ type: 'speechStart', turnId: 1, audioProcessedMs: 0 });
+    await adapter.pushAudio(chunk());
+    sockets.at(-1)!.drain = false;
+    sockets.at(-1)!.receive({ type: 'speechStart', turnId: 1, audioProcessedMs: 0 });
     const stopping = adapter.stop();
     await vi.advanceTimersByTimeAsync(21);
     await stopping;
