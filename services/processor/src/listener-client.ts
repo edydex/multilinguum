@@ -20,7 +20,7 @@ export function registerListenerClient(
         .header(
           'cache-control',
           ['heritage.js', 'operator.js', 'pcm-worklet.js'].includes(file)
-            ? 'no-cache'
+            ? 'no-store'
             : 'public, max-age=31536000, immutable',
         )
         .send(body);
