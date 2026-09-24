@@ -18,6 +18,7 @@ import {
   type TranslationSettings,
 } from './servicePlans';
 import { api, operatorUrl, subscribe } from './api';
+import { stopOwnedSession } from './stopOwnedSession';
 import { useAudioMeter } from './useAudioMeter';
 import { useAudioStreamer } from './useAudioStreamer';
 import { dbToMeterPercent, signalStatus } from './audioLevel';
@@ -351,11 +352,11 @@ export function ManagedOperator({
         setSnapshot((previous) => ({ ...previous, session: started }));
       },
       stop: async (id) => {
-        const current = await api.current(latestConnection.current);
-        if (current.session?.id !== id || ['completed', 'failed'].includes(current.session.state))
-          return;
-        const stopped = await api.stop(latestConnection.current, id);
-        setSnapshot((previous) => ({ ...previous, session: stopped.session }));
+        const stopped = await stopOwnedSession(id, {
+          current: () => api.current(latestConnection.current),
+          stop: (ownedId) => api.stop(latestConnection.current, ownedId),
+        });
+        if (stopped) setSnapshot((previous) => ({ ...previous, session: stopped }));
       },
     });
     cueController.current = controller;
