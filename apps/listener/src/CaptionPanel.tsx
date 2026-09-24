@@ -54,6 +54,7 @@ export function CaptionPanel({
   const [following, setFollowing] = useState(true);
   const [visible, setVisible] = useState(true);
   const viewport = useRef<HTMLDivElement>(null);
+  const copy = useRef<HTMLDivElement>(null);
   const segments = useRef(new Map<number, HTMLParagraphElement>());
   const follow = useRef(true);
   const programmaticUntil = useRef(0);
@@ -99,6 +100,16 @@ export function CaptionPanel({
   useLayoutEffect(() => {
     if (follow.current) scroll();
   }, [anchor, language, visible, liveText, latestFinalText, scroll]);
+  useLayoutEffect(() => {
+    if (!copy.current) return;
+    // The embedded listener lives in a shadow root. Follow the measured
+    // content height too, including wrapping after the host finishes layout.
+    const observer = new ResizeObserver(() => {
+      if (follow.current) scroll();
+    });
+    observer.observe(copy.current);
+    return () => observer.disconnect();
+  }, [visible, scroll]);
   return (
     <section className={`captions ${visible ? '' : 'collapsed'}`}>
       <div className="caption-title">
@@ -139,7 +150,7 @@ export function CaptionPanel({
             setFollowing(follow.current);
           }}
         >
-          <div className="caption-copy" lang={language}>
+          <div ref={copy} className="caption-copy" lang={language}>
             {final.map((segment) => (
               <p
                 key={`${segment.sessionId}-${segment.sequence}`}
