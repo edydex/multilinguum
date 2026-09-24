@@ -240,7 +240,10 @@ export function ManagedOperator({
             device.label === input.label &&
             !['default', 'communications'].includes(device.deviceId),
         );
-        const chosen = exact || (matches.length === 1 ? matches[0] : undefined);
+        const chosen =
+          input.id === 'syncshow:computer-audio' && slideAutomation.computerAudio
+            ? { deviceId: input.id }
+            : exact || (matches.length === 1 ? matches[0] : undefined);
         if (!chosen)
           throw new Error(
             'The saved mixer input is unavailable. Reconnect it or choose an input in Translation controls.',
@@ -248,10 +251,10 @@ export function ManagedOperator({
         const plan = (await loadServicePlans(command.serviceId)).services.find(
           (value) => value.id === command.serviceId,
         );
+        const cue = plan?.translationCues?.find((value) => value.id === command.segmentId);
         if (
-          !plan?.settings ||
-          !plan.revision ||
-          plan.stale ||
+          !plan ||
+          (!cue && (!plan.settings || !plan.revision || plan.stale)) ||
           plan.serviceRevision !== command.serviceRevision
         ) {
           throw new Error(
@@ -259,7 +262,17 @@ export function ManagedOperator({
           );
         }
         if (cancelled()) throw new Error('Translation preparation was cancelled.');
-        const settings = plan.settings;
+        const settings = cue
+          ? {
+              transcriptionProvider: 'auto' as const,
+              translationProfile: plan.settings?.translationProfile || ('quality' as const),
+              contextDocumentIds: plan.stale ? [] : plan.settings?.contextDocumentIds || [],
+              shareSermonNotesWithEconomy:
+                !plan.stale && plan.settings?.shareSermonNotesWithEconomy === true,
+              sourceLanguage: cue.settings.sourceLanguage,
+              speechEnabled: cue.settings.speechEnabled,
+            }
+          : plan.settings!;
         if (
           settings.translationProfile === 'economy' &&
           settings.contextDocumentIds.length &&
@@ -276,7 +289,16 @@ export function ManagedOperator({
         setPlans((values) => [...values.filter((value) => value.id !== plan.id), plan]);
         applyPlan(plan);
         const created = await api.create(latestConnection.current, {
-          serviceReference: serviceReference(plan, plan, settings),
+          serviceReference: cue
+            ? {
+                communityId: plan.communityId,
+                serviceId: plan.id,
+                title: plan.title,
+                serviceDate: plan.serviceDate,
+                serviceRevision: plan.serviceRevision,
+                planRevision: Math.max(1, plan.revision),
+              }
+            : serviceReference(plan, plan, settings),
           transcriptionProvider: settings.transcriptionProvider ?? 'auto',
           sourceLanguage: settings.sourceLanguage,
           translationProfile: settings.translationProfile,
@@ -286,6 +308,7 @@ export function ManagedOperator({
             translationProvider:
               language === settings.sourceLanguage ? 'deterministic' : 'openai-cascade',
             voiceMode: language === settings.sourceLanguage ? 'source' : 'natural',
+            ...(cue ? { speechVoice: cue.settings.voice } : {}),
             fallbackOrder: ['mute'],
             muted: false,
             speechEnabled: language !== settings.sourceLanguage && settings.speechEnabled,
@@ -369,7 +392,10 @@ export function ManagedOperator({
   }, [automationSessionId, automationStatus.phase, audio.error, capture.error]);
   // Store a named input after explicit selection; never save a system-default alias.
   useEffect(() => {
-    const selected = audio.devices.find((device) => device.id === deviceId);
+    const selected =
+      deviceId === 'syncshow:computer-audio' && slideAutomation?.computerAudio
+        ? { id: deviceId, label: 'Computer audio (all apps)' }
+        : audio.devices.find((device) => device.id === deviceId);
     if (
       slideAutomation &&
       selected &&
@@ -1035,7 +1061,7 @@ export function ManagedOperator({
           </p>
         </section>
         <section className="card">
-          <h2>Mixer feed</h2>
+          <h2>Audio source</h2>
           {slideAutomation && (
             <p role={automationStatus.phase === 'error' ? 'alert' : 'status'}>
               Slide cues: {automationStatus.phase}. {automationStatus.message || ''}
@@ -1055,13 +1081,18 @@ export function ManagedOperator({
                     : 'No mixer connected'}
           </p>
           <label>
-            Mixer / incoming audio device
+            Audio from
             <select
               value={deviceId ?? ''}
               disabled={captureRequested}
               onChange={(event) => setDeviceId(event.target.value || undefined)}
             >
               <option value="">System default</option>
+              {slideAutomation?.computerAudio && (
+                <option value="syncshow:computer-audio">
+                  Computer audio · Safari and other apps
+                </option>
+              )}
               {audio.devices.map((device, index) => (
                 <option key={`${device.id}-${index}`} value={device.id}>
                   {device.label}
@@ -1073,7 +1104,9 @@ export function ManagedOperator({
           <p className="hint">
             {captureRequested
               ? `${signalStatus(audio.levelDb)} · ${Math.round(dbToMeterPercent(audio.levelDb))}%`
-              : 'Opening these controls does not activate your microphone.'}
+              : deviceId === 'syncshow:computer-audio'
+                ? 'Captures sound from all computer apps. Only audio is sent; close or mute unrelated apps.'
+                : 'Opening these controls does not activate an input.'}
           </p>
           <button
             disabled={expired || (!captureRequested && snapshot.capture.connected)}

@@ -53,6 +53,7 @@ export interface ChannelConfig {
   translationProvider: ProviderKind;
   voiceMode: VoiceMode;
   voiceProfileId?: string;
+  speechVoice?: 'cedar' | 'marin';
   fallbackOrder: Array<'natural' | 'cloned' | 'mute'>;
   muted: boolean;
   /** False disables audio generation/publication while translation continues. Omitted by older clients. */

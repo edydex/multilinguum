@@ -10,6 +10,7 @@ export interface SlideTranslationStatus {
 }
 export interface SlideAutomationBridge {
   version: 1;
+  computerAudio?: boolean;
   onCommand(handler: (command: SlideTranslationCommand) => void): () => void;
   report(status: SlideTranslationStatus): void;
   getInput(): Promise<{ id: string; label: string } | null>;

@@ -16,6 +16,17 @@ export interface ServiceTranslationPlan {
   revision: number;
   settings: TranslationSettings | null;
   stale: boolean;
+  translationCues?: Array<{
+    id: string;
+    settings: {
+      sourceLanguage: 'en' | 'ru';
+      targetLanguage: 'en' | 'ru';
+      voice: 'cedar' | 'marin';
+      speechEnabled: boolean;
+      captionStyle: string;
+      captionChannel: string;
+    };
+  }>;
 }
 export interface ServicePlanOptions {
   preferredServiceId?: string;

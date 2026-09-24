@@ -1110,7 +1110,10 @@ export class SessionEngine {
       const profile = await this.#voiceProfile(runtime.config);
       return this.#dependencies.clonedSpeech.render(segment, profile, context);
     }
-    return this.#naturalRenderer().render(segment, undefined, context);
+    return this.#naturalRenderer().render(segment, undefined, {
+      ...context,
+      ...(runtime.config.speechVoice ? { speechVoice: runtime.config.speechVoice } : {}),
+    });
   }
 
   #playbackBacklogMs(runtime: RuntimeChannel): number {

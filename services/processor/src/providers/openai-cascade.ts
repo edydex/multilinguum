@@ -465,7 +465,7 @@ export class OpenAINaturalSpeechRenderer implements SpeechRenderer {
       .create(
         {
           model: this.#model,
-          voice: 'cedar',
+          voice: context?.speechVoice ?? 'cedar',
           input: segment.text,
           response_format: 'pcm',
           speed,
