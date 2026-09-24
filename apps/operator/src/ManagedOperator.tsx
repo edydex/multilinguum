@@ -23,7 +23,7 @@ import { useAudioStreamer } from './useAudioStreamer';
 import { dbToMeterPercent, signalStatus } from './audioLevel';
 import { ManagedArchives } from './ManagedArchives';
 import { ServiceUsagePanel } from './ServiceUsagePanel';
-import { recognitionRateUsd } from '@multilinguum/protocol';
+import { recognitionRateUsd, realtimeInterpretationOptions } from '@multilinguum/protocol';
 import { MuseSettings, type MuseSettingsAccess } from './MuseSettings';
 
 export interface ControlLease {
@@ -299,19 +299,7 @@ export function ManagedOperator({
                 planRevision: Math.max(1, plan.revision),
               }
             : serviceReference(plan, plan, settings),
-          transcriptionProvider: 'openai',
-          sourceLanguage: settings.sourceLanguage,
-          translationProfile: settings.translationProfile,
-          targets: (['en', 'ru'] as const).map((language) => ({
-            id: `channel-${language}`,
-            targetLanguage: language,
-            translationProvider:
-              language === settings.sourceLanguage ? 'deterministic' : 'openai-realtime',
-            voiceMode: language === settings.sourceLanguage ? 'source' : 'natural',
-            fallbackOrder: ['mute'],
-            muted: false,
-            speechEnabled: language !== settings.sourceLanguage && settings.speechEnabled,
-          })),
+          ...realtimeInterpretationOptions(settings.sourceLanguage, settings.speechEnabled),
           processingNode: {
             id: 'community-processor',
             name: 'Church translation',

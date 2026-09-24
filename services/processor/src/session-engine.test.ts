@@ -11,6 +11,7 @@ import type {
   TranslationProvider,
   ProcessorEvent,
 } from '@multilinguum/protocol';
+import { realtimeInterpretationOptions } from '@multilinguum/protocol';
 import { SessionEngine } from './session-engine.js';
 import { loadConfig } from './config.js';
 import { translationProfileInfo } from './translation-profiles.js';
@@ -215,6 +216,7 @@ async function fixture(
     ...(usageModel ? { translationProfile: 'quality' } : {}),
     sourceLanguage: source,
     targets,
+    ...(recording.realtime ? realtimeInterpretationOptions(source, speechEnabled) : {}),
     processingNode: {
       id: 'node',
       name: 'Node',
@@ -585,3 +587,22 @@ it('carries capture time into captions and rendered speech when the microphone s
     sourceEndAtUnixMs: captureEnd,
   });
 });
+
+// Exercise exactly the operator's options against the real session validator,
+// including a processor with the older cascade profiles configured.
+it.each([true, false])(
+  'accepts a realtime cue with listener audio %s and no cascade profile',
+  async (speechEnabled) => {
+    const { engine } = await fixture('en', speechEnabled, { realtime: true }, 'gpt-transcribe');
+    expect(engine.current()).toMatchObject({ state: 'live', transcriptionProvider: 'openai' });
+    expect(engine.current()?.translationProfile).toBeUndefined();
+    expect(
+      engine.current()?.targets.find((channel) => channel.targetLanguage === 'ru'),
+    ).toMatchObject({
+      translationProvider: 'openai-realtime',
+      voiceMode: 'natural',
+      speechEnabled,
+    });
+    await engine.stop();
+  },
+);
