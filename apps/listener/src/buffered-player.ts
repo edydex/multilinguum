@@ -23,6 +23,8 @@ export class BufferedPlayer {
   private consumed = new Set<string>();
   private highestSequence = -1;
   private selectedAt = 0;
+  private outputNextAt = 0;
+  private outputStops = new Set<() => void>();
   constructor(
     private readonly ports: BufferedPlayerPorts,
     private readonly video: boolean,
@@ -40,6 +42,9 @@ export class BufferedPlayer {
     this.abort = new AbortController();
     this.loading = false;
     this.ready = undefined;
+    for (const stop of this.outputStops) stop();
+    this.outputStops.clear();
+    this.outputNextAt = 0;
     this.stopPlaying?.();
     this.stopPlaying = undefined;
     this.consumed.clear();
@@ -50,6 +55,7 @@ export class BufferedPlayer {
     if (!this.enabled) return;
     const attempt = this.attempt;
     const current = () => this.enabled && this.attempt === attempt;
+    clips = clips.filter((clip) => !this.video || clip.timingBasis !== 'output');
     const deadline = (clip: BufferedAudioClip) =>
       this.video ? clip.sourceStartAtUnixMs : clip.publishedAtUnixMs;
     const clock = () => (this.video ? this.ports.clock().sourceNow : this.ports.clock().serverNow);
@@ -58,7 +64,29 @@ export class BufferedPlayer {
     // The Set is bounded by the server's window even through a long service.
     const retained = new Set(clips.map((clip) => clip.id));
     for (const id of this.consumed) if (!retained.has(id)) this.consumed.delete(id);
-    if (this.ready && !this.stopPlaying) {
+    if (this.ready?.clip.timingBasis === 'output' && this.outputNextAt <= clock() + 2000) {
+      const { clip, audio } = this.ready;
+      this.ready = undefined;
+      this.highestSequence = Math.max(this.highestSequence, clip.sequence);
+      // Schedule decoded chunks on the audio clock before the previous chunk ends.
+      // Waiting for onended adds a tick-sized silence at every packet boundary.
+      const startAt = Math.max(clock() + 50, this.outputNextAt);
+      this.outputNextAt = startAt + audio.durationMs;
+      try {
+        const stop = audio.play(startAt - clock(), () => {
+          if (!current()) return;
+          this.outputStops.delete(stop);
+          if (!this.outputStops.size) this.ports.changed(false);
+        });
+        this.outputStops.add(stop);
+        this.ports.changed(true);
+      } catch {
+        this.stop();
+        this.ports.failed('Audio playback stopped. Choose audio again.');
+        return;
+      }
+    }
+    if (this.ready && this.ready.clip.timingBasis !== 'output' && !this.stopPlaying) {
       const { clip, audio } = this.ready;
       const waitMs = deadline(clip) - clock();
       if (waitMs < -maximumLate) {

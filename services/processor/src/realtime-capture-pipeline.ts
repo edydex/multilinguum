@@ -19,6 +19,7 @@ interface TranscriptBuffer {
   endMs: number;
   firstDeltaAtUnixMs: number;
   sequence: number;
+  revision: number;
 }
 
 interface CapturePoint {
@@ -145,7 +146,6 @@ export class RealtimeCapturePipeline {
     const directConfigs = this.#session.targets.filter(
       (channel) =>
         !channel.muted &&
-        channel.speechEnabled !== false &&
         channel.voiceMode === 'natural' &&
         channel.translationProvider === 'openai-realtime',
     );
@@ -608,13 +608,19 @@ export class RealtimeCapturePipeline {
       endMs: elapsed,
       firstDeltaAtUnixMs: delta.receivedAtUnixMs,
       sequence: this.#transcriptSequences.get(delta.channelId) ?? 0,
+      revision: 0,
     };
     buffer.text += delta.delta;
+    buffer.revision++;
     buffer.endMs = Math.max(buffer.endMs, elapsed);
     this.#transcriptBuffers.set(delta.channelId, buffer);
     const clauseEnded = /[.!?…]["'»”)]*\s*$/u.test(buffer.text);
-    if (clauseEnded || buffer.text.length >= 240 || buffer.endMs - buffer.startMs >= 3_000) {
+    // Deltas are already visible. Keep a sentence together instead of splitting it
+    // on a playback timer; cap malformed, unpunctuated output to bound memory.
+    if (clauseEnded || buffer.text.length >= 1_200) {
       this.#flushTranscript(delta.channelId);
+    } else {
+      this.#publishTranscript(delta.channelId, buffer, false);
     }
   }
 
@@ -624,15 +630,24 @@ export class RealtimeCapturePipeline {
     if (!buffer || !text) return;
     this.#transcriptBuffers.delete(channelId);
     this.#transcriptSequences.set(channelId, buffer.sequence + 1);
+    this.#publishTranscript(channelId, buffer, true);
+  }
+
+  #publishTranscript(channelId: string, buffer: TranscriptBuffer, final: boolean): void {
+    const text = buffer.text.trim();
+    if (!text) return;
+    const snapshot = { ...buffer };
     this.#translatedTranscriptChain = this.#translatedTranscriptChain
       .then(async () => {
         if (!this.#activeDirectChannelIds.has(channelId)) return;
         await this.#engine.ingestRealtimeTranscript(channelId, {
           text,
-          sourceStartMs: buffer.startMs,
-          sourceEndMs: Math.max(buffer.startMs + 1, buffer.endMs),
-          sequence: buffer.sequence,
-          firstDeltaAtUnixMs: buffer.firstDeltaAtUnixMs,
+          sourceStartMs: snapshot.startMs,
+          sourceEndMs: Math.max(snapshot.startMs + 1, snapshot.endMs),
+          sequence: snapshot.sequence,
+          firstDeltaAtUnixMs: snapshot.firstDeltaAtUnixMs,
+          final,
+          revision: snapshot.revision,
         });
       })
       .catch((error) =>
@@ -663,7 +678,9 @@ export class RealtimeCapturePipeline {
   #failDirectChannel(channelId: string, error: Error): void {
     if (!this.#activeDirectChannelIds.delete(channelId)) return;
     this.useCascadeForChannel(channelId);
-    this.#engine.reportChannelFailure(channelId, error, 'openai-cascade+natural-fallback');
+    // Do not silently switch a planned realtime cue to the delayed cascade.
+    this.#engine.reportChannelFailure(channelId, error);
+    this.#failSource(error);
   }
 
   #sourceChannelId(): string {

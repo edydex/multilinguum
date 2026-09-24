@@ -448,6 +448,38 @@ describe('OpenAI Realtime provider adapters', () => {
     expect(connection.closed).toBe(true);
   });
 
+  it('coalesces continuous audio without losing the final samples and cancels pending audio', async () => {
+    vi.useFakeTimers();
+    const connection = new FakeRealtimeConnection({ autoUpdate: true, autoClose: true });
+    const translator = new OpenAIRealtimeTranslationChannel('test-key', 'gpt-realtime-translate', {
+      connectionFactory: () => connection,
+    });
+    const audio: RenderedSpeech[] = [];
+    translator.onAudio((frame) => audio.push(frame));
+    await translator.start(session(), channel());
+    const emit = (samples: number) =>
+      connection.emit({
+        type: 'session.output_audio.delta',
+        sample_rate: 48_000,
+        delta: Buffer.alloc(samples * 2, 7).toString('base64'),
+      });
+    emit(24_000);
+    expect(audio).toHaveLength(0);
+    emit(24_000);
+    expect(audio).toHaveLength(1);
+    expect(audio[0]).toMatchObject({ startMs: 0, endMs: 1000, sequence: 0 });
+    emit(4_800);
+    await vi.advanceTimersByTimeAsync(250);
+    expect(audio[1]).toMatchObject({ startMs: 1000, endMs: 1100, sequence: 1 });
+    expect(
+      Buffer.concat(audio.map((frame) => Buffer.from(frame.data))).equals(Buffer.alloc(105_600, 7)),
+    ).toBe(true);
+    emit(4_800);
+    translator.cancel();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(audio).toHaveLength(2);
+  });
+
   it('normalizes translated transcript and 24 kHz PCM output without provider events leaking', async () => {
     const connection = new FakeRealtimeConnection({ autoUpdate: true, autoClose: true });
     const factory: RealtimeConnectionFactory = () => connection;
@@ -487,11 +519,12 @@ describe('OpenAI Realtime provider adapters', () => {
       delta: 'Grace to you',
       sourceElapsedMs: 1_200,
     });
+    await translator.stop();
     expect(audio).toHaveLength(1);
     expect(audio[0]).toMatchObject({
       encoding: 'pcm_s16le',
       sampleRate: 48_000,
-      startMs: 1_200,
+      startMs: 0,
       sequence: 0,
       language: 'en',
     });

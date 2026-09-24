@@ -32,3 +32,24 @@ The local Codex browser rendered and switched both synthetic language feeds thro
 The September 14 local relay rehearsal used LiveKit 1.13.7 with disposable credentials and synthetic tones. It verified native receiver audio, queue clearing, listener counts, reconnect, and browser WebRTC connection/stop, alongside buffered browser playback. It did not use a microphone, paid providers, LiveKit Cloud, or physical listening devices.
 
 A separate September 14 outage rehearsal configured a local relay endpoint that rejected connections. Both Quality and Economy started and played synthetic audio in the browser without a relay request. Operator speech-off stopped listener audio while new captions continued without new rendering; re-enabling Quality speech required a fresh listener audio choice. Provider calls were blocked. This verifies delivery behavior, not translation quality or venue readiness.
+
+## Continuous OpenAI interpretation
+
+Planned SyncShow cues use `gpt-realtime-translate` for translated text and audio.
+Capture travels through the church processor to OpenAI over one persistent
+translation WebSocket; an independent OpenAI recognizer supplies original-language
+captions. Translation does not wait for that recognizer, a GPT text request, or TTS.
+Muse remains available for separately configured sessions and is not invoked by these cues.
+
+Translated text deltas are identified as `delivery: streaming`; they can be displayed
+immediately, while provisional recognition remains provisional. Sentences stay together
+until punctuation or a bounded unpunctuated-text limit. There is no reading-speed display
+queue for this stream. The realtime interpreter supplies its own voice; saved cascade
+voice choices do not change it.
+
+Realtime PCM audio is grouped into short chunks for the existing public listener relay.
+This works without LiveKit. Chunks have `timingBasis: output` and are scheduled contiguously
+by the browser audio player. They are not represented as source-video alignment, so the
+video-synchronized listener excludes them; phone listeners should use `/translate`.
+A realtime provider failure stops capture visibly rather than switching silently to the
+slower cascade. Stop drains the provider, then finalizes the archive.

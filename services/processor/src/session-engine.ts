@@ -434,6 +434,8 @@ export class SessionEngine {
       sourceEndMs: number;
       sequence: number;
       firstDeltaAtUnixMs: number;
+      final?: boolean;
+      revision?: number;
     },
   ): Promise<TranscriptSegment> {
     const session = this.#requiredSession();
@@ -454,13 +456,16 @@ export class SessionEngine {
       sourceStartMs: input.sourceStartMs,
       sourceEndMs: input.sourceEndMs,
       emittedAt: new Date().toISOString(),
-      final: true,
+      final: input.final !== false,
+      revision: input.revision ?? 0,
+      delivery: 'streaming',
       sequence: input.sequence,
     };
-    await this.#dependencies.archive.appendTranscript(segment);
+    if (segment.final) await this.#dependencies.archive.appendTranscript(segment);
     const captionStartedAtUnixMs = Date.now();
     await this.#dependencies.relay.publishCaption(segment);
     const captionCompletedAtUnixMs = Date.now();
+    if (!segment.final) return segment;
     const sample = this.#latencySample({
       runtime,
       source: segment,
@@ -1196,11 +1201,7 @@ export class SessionEngine {
 
   #translationEngine(config: ChannelConfig): string {
     if (config.voiceMode === 'source') return 'delayed-original';
-    if (
-      config.translationProvider === 'openai-realtime' &&
-      config.voiceMode === 'natural' &&
-      config.speechEnabled !== false
-    ) {
+    if (config.translationProvider === 'openai-realtime' && config.voiceMode === 'natural') {
       return this.#dependencies.realtimeTranslationEngine ?? 'openai-realtime-not-configured';
     }
     return this.#translationProvider(config).name;

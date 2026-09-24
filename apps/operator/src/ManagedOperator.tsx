@@ -265,7 +265,7 @@ export function ManagedOperator({
         const settings = cue
           ? {
               transcriptionProvider: plan.settings?.transcriptionProvider ?? ('auto' as const),
-              translationProfile: plan.settings?.translationProfile || ('quality' as const),
+              translationProfile: 'quality' as const,
               contextDocumentIds: plan.stale ? [] : plan.settings?.contextDocumentIds || [],
               shareSermonNotesWithEconomy:
                 !plan.stale && plan.settings?.shareSermonNotesWithEconomy === true,
@@ -299,16 +299,15 @@ export function ManagedOperator({
                 planRevision: Math.max(1, plan.revision),
               }
             : serviceReference(plan, plan, settings),
-          transcriptionProvider: settings.transcriptionProvider ?? 'auto',
+          transcriptionProvider: 'openai',
           sourceLanguage: settings.sourceLanguage,
           translationProfile: settings.translationProfile,
           targets: (['en', 'ru'] as const).map((language) => ({
             id: `channel-${language}`,
             targetLanguage: language,
             translationProvider:
-              language === settings.sourceLanguage ? 'deterministic' : 'openai-cascade',
+              language === settings.sourceLanguage ? 'deterministic' : 'openai-realtime',
             voiceMode: language === settings.sourceLanguage ? 'source' : 'natural',
-            ...(cue ? { speechVoice: cue.settings.voice } : {}),
             fallbackOrder: ['mute'],
             muted: false,
             speechEnabled: language !== settings.sourceLanguage && settings.speechEnabled,

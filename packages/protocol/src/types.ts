@@ -232,6 +232,8 @@ export interface TranscriptSegment {
   revision?: number;
   /** Why this caption is provisional, or that finalized speech is queued. */
   phase?: 'transcribing' | 'translating' | 'queued';
+  /** Append-only translated text from a continuous interpreter, safe to display immediately. */
+  delivery?: 'streaming';
   /** A source-audio pause detected immediately after this segment. */
   sourcePauseAfterMs?: number | undefined;
   /** Coarse source delivery cues used to steer generic speech without copying a voice. */
@@ -362,6 +364,8 @@ export type ProcessorEvent =
 
 /** Public metadata only. PCM and private session configuration never enter events. */
 export interface BufferedAudioClip {
+  /** Output-clock clips play live; they must not be aligned to a source video. */
+  timingBasis?: 'source' | 'output';
   id: string;
   sessionId: string;
   channelId: string;
@@ -393,6 +397,7 @@ export interface PublicServiceState {
     audioAvailable?: boolean;
     /** Source-timestamped WAV window, independent of LiveKit credentials. */
     bufferedAudioAvailable?: boolean;
+    audioTimingBasis?: 'source' | 'output';
     channelId?: string;
     audioGeneration?: number;
     disclosure: string;

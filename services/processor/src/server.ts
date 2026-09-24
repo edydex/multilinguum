@@ -96,17 +96,12 @@ function publicState(
             language: channel.targetLanguage,
             channelId: channel.id,
             audioGeneration: relay.generation(channel.id),
-            bufferedAudioAvailable:
-              !channel.muted &&
-              channel.speechEnabled !== false &&
-              channel.translationProvider !== 'openai-realtime',
+            bufferedAudioAvailable: !channel.muted && channel.speechEnabled !== false,
+            audioTimingBasis:
+              channel.translationProvider === 'openai-realtime' ? 'output' : 'source',
             voiceMode: channel.voiceMode,
             available: !channel.muted,
-            audioAvailable:
-              !channel.muted &&
-              channel.speechEnabled !== false &&
-              (channel.translationProvider !== 'openai-realtime' ||
-                Boolean(config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET)),
+            audioAvailable: !channel.muted && channel.speechEnabled !== false,
             disclosure:
               channel.speechEnabled === false
                 ? 'Live text; audio is off'

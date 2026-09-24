@@ -27,6 +27,9 @@ export class OpenAIRealtimeTranslationChannel implements RealtimeTranslationChan
   #session: ServiceSession | undefined;
   #channel: ChannelConfig | undefined;
   #audioSequence = 0;
+  #outputSamples = 0;
+  #pendingAudio = new Uint8Array();
+  #audioFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     apiKey: string,
@@ -48,6 +51,8 @@ export class OpenAIRealtimeTranslationChannel implements RealtimeTranslationChan
     this.#session = session;
     this.#channel = channel;
     this.#audioSequence = 0;
+    this.#outputSamples = 0;
+    this.#pendingAudio = new Uint8Array();
     const connection = this.#connectionFactory({
       url: `wss://api.openai.com/v1/realtime/translations?model=${encodeURIComponent(this.#model)}`,
       bearerToken: this.#apiKey,
@@ -89,11 +94,14 @@ export class OpenAIRealtimeTranslationChannel implements RealtimeTranslationChan
     try {
       await closed;
     } finally {
+      this.#flushAudio();
       connection.close();
     }
   }
 
   cancel(): void {
+    clearTimeout(this.#audioFlushTimer);
+    this.#pendingAudio = new Uint8Array();
     this.#connection?.close();
     this.#connection = undefined;
     this.#session = undefined;
@@ -151,15 +159,31 @@ export class OpenAIRealtimeTranslationChannel implements RealtimeTranslationChan
       }
       return;
     }
-    const durationMs = Math.round((data.byteLength / 2 / 48_000) * 1_000);
-    const startMs =
-      typeof event.elapsed_ms === 'number' ? Math.max(0, Math.round(event.elapsed_ms)) : 0;
+    const joined = new Uint8Array(this.#pendingAudio.length + data.length);
+    joined.set(this.#pendingAudio);
+    joined.set(data, this.#pendingAudio.length);
+    this.#pendingAudio = joined;
+    clearTimeout(this.#audioFlushTimer);
+    if (joined.byteLength >= 96_000) this.#flushAudio();
+    else this.#audioFlushTimer = setTimeout(() => this.#flushAudio(), 250);
+  }
+
+  #flushAudio(): void {
+    clearTimeout(this.#audioFlushTimer);
+    const channel = this.#channel;
+    const data = this.#pendingAudio;
+    if (!channel || !data.byteLength) return;
+    this.#pendingAudio = new Uint8Array();
+    // Realtime audio has an output clock. Never represent it as source alignment.
+    const startMs = Math.round(this.#outputSamples / 48);
+    this.#outputSamples += data.byteLength / 2;
+    const endMs = Math.round(this.#outputSamples / 48);
     const audio: RenderedSpeech = {
       data,
       encoding: 'pcm_s16le',
       sampleRate: 48_000,
       startMs,
-      endMs: startMs + Math.max(1, durationMs),
+      endMs: Math.max(startMs + 1, endMs),
       sequence: this.#audioSequence++,
       language: channel.targetLanguage,
       renderer: this.name,

@@ -217,7 +217,7 @@ describe('RealtimeCapturePipeline', () => {
     },
   );
 
-  it('uses only the shared transcriber when translated speech is disabled', async () => {
+  it('keeps continuous translation enabled for captions when translated speech is disabled', async () => {
     const session = liveSession();
     session.targets = session.targets.map((target) => ({ ...target, speechEnabled: false }));
     const createDirect = vi.fn(() => new FakeTranslationChannel());
@@ -230,7 +230,7 @@ describe('RealtimeCapturePipeline', () => {
     await pipeline.start();
     pipeline.push(new Uint8Array(960));
     await pipeline.close();
-    expect(createDirect).not.toHaveBeenCalled();
+    expect(createDirect).toHaveBeenCalledOnce();
     expect(transcriber.pushed).toHaveLength(1);
   });
 
@@ -342,7 +342,7 @@ describe('RealtimeCapturePipeline', () => {
       channelId: 'channel-en',
       language: 'en',
       delta: 'you and peace.',
-      sourceElapsedMs: 1_600,
+      sourceElapsedMs: 5_600,
       receivedAtUnixMs: Date.now(),
     });
     translation.emitAudio({
@@ -372,12 +372,13 @@ describe('RealtimeCapturePipeline', () => {
       expect.any(Set),
     ]);
     expect(translatedTranscripts).toEqual([
+      ['channel-en', expect.objectContaining({ text: 'Grace to', final: false, revision: 1 })],
       [
         'channel-en',
         expect.objectContaining({
           text: 'Grace to you and peace.',
           sourceStartMs: 1_200,
-          sourceEndMs: 1_600,
+          sourceEndMs: 5_600,
           sequence: 0,
         }),
       ],
