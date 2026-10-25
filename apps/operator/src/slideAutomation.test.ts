@@ -151,3 +151,19 @@ it('a failed Stop is retried before a damaged live session can be replaced', asy
     'start:session-2',
   ]);
 });
+
+it('manual translation keeps its session when slide cues arrive, and explicit Stop stops it', async () => {
+  const f = fixture(),
+    controller = new SlideAutomation(f.io);
+  controller.command({ ...command('live'), manual: true });
+  await tick();
+  controller.command(command('prepare', 'another-cue'));
+  await tick();
+  controller.command(command('live', 'another-cue'));
+  await tick();
+  expect(f.events.filter((event) => event.startsWith('prepare'))).toHaveLength(1);
+  expect(f.events.some((event) => event.startsWith('stop'))).toBe(false);
+  controller.command(command('idle'));
+  await tick();
+  expect(f.events).toContain('stop:session-1');
+});

@@ -2,6 +2,7 @@ import {
   SlideAutomation,
   type SlideAutomationBridge,
   type SlideTranslationStatus,
+  type TranslationDefaults,
 } from './slideAutomation';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type {
@@ -79,7 +80,7 @@ export function ManagedOperator({
   const [source, setSource] = useState<'en' | 'ru'>('en');
   const [speech, setSpeech] = useState(false);
   const [profileId, setProfileId] = useState<TranslationProfileId>('quality');
-  const [recognition, setRecognition] = useState<'auto' | 'muse' | 'openai'>('auto');
+  const [recognition, setRecognition] = useState<'auto' | 'muse' | 'openai'>('openai');
   const [useNotes, setUseNotes] = useState(false);
   const [documents, setDocuments] = useState<ContextDocument[]>([]);
   const [noteIds, setNoteIds] = useState<string[]>([]);
@@ -209,6 +210,13 @@ export function ManagedOperator({
     void slideAutomation.getInput().then((input) => {
       if (input && !closed) setDeviceId(input.id);
     });
+    void slideAutomation.getDefaults?.().then((defaults) => {
+      if (!closed) {
+        setSource(defaults.sourceLanguage);
+        setRecognition(defaults.transcriptionProvider);
+        setSpeech(defaults.speechEnabled);
+      }
+    });
     const disconnect = () => {
       setCaptureRequested(false);
       setAutomationSessionId(undefined);
@@ -222,7 +230,9 @@ export function ManagedOperator({
       },
       disconnect,
       prepare: async (command, cancelled) => {
-        if (!loadServicePlans) throw new Error('Update Community to use translation cues.');
+        if (!command.manual && !loadServicePlans)
+          throw new Error('Update Community to use translation cues.');
+        const defaults = command.defaults || (await slideAutomation.getDefaults?.());
         const input = await slideAutomation.getInput();
         if (!input || ['default', 'communications'].includes(input.id))
           throw new Error(
@@ -249,31 +259,52 @@ export function ManagedOperator({
           throw new Error(
             'The saved mixer input is unavailable. Reconnect it or choose an input in Translation controls.',
           );
-        const plan = (await loadServicePlans(command.serviceId)).services.find(
-          (value) => value.id === command.serviceId,
-        );
+        const plan = command.manual
+          ? undefined
+          : (await loadServicePlans!(command.serviceId)).services.find(
+              (value) => value.id === command.serviceId,
+            );
         const cue = plan?.translationCues?.find((value) => value.id === command.segmentId);
         if (
-          !plan ||
-          (!cue && (!plan.settings || !plan.revision || plan.stale)) ||
-          plan.serviceRevision !== command.serviceRevision
+          !command.manual &&
+          (!plan ||
+            (!cue && (!plan.settings || !plan.revision || plan.stale)) ||
+            plan.serviceRevision !== command.serviceRevision)
         ) {
           throw new Error(
             'Save translation settings for this service, then load the current service in SyncShow.',
           );
         }
         if (cancelled()) throw new Error('Translation preparation was cancelled.');
-        const settings = cue
+        const settings = command.manual
           ? {
-              transcriptionProvider: plan.settings?.transcriptionProvider ?? ('auto' as const),
+              sourceLanguage: defaults?.sourceLanguage ?? ('en' as const),
+              transcriptionProvider: defaults?.transcriptionProvider ?? ('openai' as const),
+              speechEnabled: defaults?.speechEnabled ?? false,
               translationProfile: 'quality' as const,
-              contextDocumentIds: plan.stale ? [] : plan.settings?.contextDocumentIds || [],
-              shareSermonNotesWithEconomy:
-                !plan.stale && plan.settings?.shareSermonNotesWithEconomy === true,
-              sourceLanguage: cue.settings.sourceLanguage,
-              speechEnabled: cue.settings.speechEnabled,
+              contextDocumentIds: [] as string[],
+              shareSermonNotesWithEconomy: false,
             }
-          : plan.settings!;
+          : cue
+            ? {
+                transcriptionProvider:
+                  defaults?.transcriptionProvider ??
+                  plan!.settings?.transcriptionProvider ??
+                  ('openai' as const),
+                translationProfile: 'quality' as const,
+                contextDocumentIds: plan!.stale ? [] : plan!.settings?.contextDocumentIds || [],
+                shareSermonNotesWithEconomy:
+                  !plan!.stale && plan!.settings?.shareSermonNotesWithEconomy === true,
+                sourceLanguage: cue.settings.sourceLanguage,
+                speechEnabled: cue.settings.speechEnabled,
+              }
+            : {
+                ...plan!.settings!,
+                transcriptionProvider:
+                  defaults?.transcriptionProvider ??
+                  plan!.settings!.transcriptionProvider ??
+                  ('openai' as const),
+              };
         if (
           settings.translationProfile === 'economy' &&
           settings.contextDocumentIds.length &&
@@ -286,21 +317,48 @@ export function ManagedOperator({
             'Another translation session is already active. Open Translation controls to review it.',
           );
         }
-        setServiceId(plan.id);
-        setPlans((values) => [...values.filter((value) => value.id !== plan.id), plan]);
-        applyPlan(plan);
+        if (plan) {
+          setServiceId(plan.id);
+          setPlans((values) => [...values.filter((value) => value.id !== plan.id), plan]);
+          applyPlan(plan);
+        }
         const created = await api.create(latestConnection.current, {
-          serviceReference: cue
+          ...(plan
             ? {
-                communityId: plan.communityId,
-                serviceId: plan.id,
-                title: plan.title,
-                serviceDate: plan.serviceDate,
-                serviceRevision: plan.serviceRevision,
-                planRevision: Math.max(1, plan.revision),
+                serviceReference: cue
+                  ? {
+                      communityId: plan.communityId,
+                      serviceId: plan.id,
+                      title: plan.title,
+                      serviceDate: plan.serviceDate,
+                      serviceRevision: plan.serviceRevision,
+                      planRevision: Math.max(1, plan.revision),
+                    }
+                  : serviceReference(plan, plan, settings),
               }
-            : serviceReference(plan, plan, settings),
-          ...realtimeInterpretationOptions(settings.sourceLanguage, settings.speechEnabled),
+            : {}),
+          ...(settings.transcriptionProvider === 'openai'
+            ? realtimeInterpretationOptions(settings.sourceLanguage, settings.speechEnabled)
+            : {
+                translationProfile: settings.translationProfile,
+                transcriptionProvider: settings.transcriptionProvider,
+                sourceLanguage: settings.sourceLanguage,
+                targets: (['en', 'ru'] as const).map((language) => ({
+                  id: `channel-${language}`,
+                  targetLanguage: language,
+                  translationProvider:
+                    language === settings.sourceLanguage
+                      ? ('deterministic' as const)
+                      : ('openai-cascade' as const),
+                  voiceMode:
+                    language === settings.sourceLanguage
+                      ? ('source' as const)
+                      : ('natural' as const),
+                  fallbackOrder: ['mute' as const],
+                  muted: false,
+                  speechEnabled: language !== settings.sourceLanguage && settings.speechEnabled,
+                })),
+              }),
           processingNode: {
             id: 'community-processor',
             name: 'Church translation',
@@ -525,6 +583,22 @@ export function ManagedOperator({
     }
   }
   async function start() {
+    if (slideAutomation && cueController.current && !locked) {
+      const defaults: TranslationDefaults = {
+        sourceLanguage: source,
+        transcriptionProvider: recognition,
+        speechEnabled: speech,
+      };
+      cueController.current.command({
+        manual: true,
+        serviceId: 'syncshow-manual',
+        serviceRevision: '0'.repeat(64),
+        segmentId: 'manual',
+        phase: 'live',
+        defaults,
+      });
+      return;
+    }
     if (!locked) {
       if (serviceId && (!selectedService || !loadServicePlans || !planReady))
         throw new Error(
@@ -622,6 +696,11 @@ export function ManagedOperator({
         <div>
           <p className="eyebrow">CHURCH SERVICE</p>
           <h1>Live translation</h1>
+          {slideAutomation?.returnToShow && (
+            <button onClick={() => void slideAutomation.returnToShow?.()}>
+              Return to Show · keep translating
+            </button>
+          )}
           <p>
             Start here or in SyncShow. Connect the mixer on the computer receiving the church’s
             audio.
@@ -1018,7 +1097,15 @@ export function ManagedOperator({
                 onClick={() =>
                   void act(async () => {
                     setCaptureRequested(false);
-                    await api.stop(connection);
+                    if (slideAutomation && automationSessionId && cueController.current) {
+                      cueController.current.command({
+                        manual: true,
+                        serviceId: 'syncshow-manual',
+                        serviceRevision: '0'.repeat(64),
+                        segmentId: 'manual',
+                        phase: 'idle',
+                      });
+                    } else await api.stop(connection);
                   })
                 }
               >
@@ -1030,7 +1117,15 @@ export function ManagedOperator({
                 disabled={busy || expired}
                 onClick={() =>
                   void act(async () => {
-                    await api.stop(connection);
+                    if (slideAutomation && automationSessionId && cueController.current) {
+                      cueController.current.command({
+                        manual: true,
+                        serviceId: 'syncshow-manual',
+                        serviceRevision: '0'.repeat(64),
+                        segmentId: 'manual',
+                        phase: 'idle',
+                      });
+                    } else await api.stop(connection);
                   })
                 }
               >

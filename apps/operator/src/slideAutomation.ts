@@ -1,4 +1,11 @@
+export interface TranslationDefaults {
+  sourceLanguage: 'en' | 'ru';
+  transcriptionProvider: 'auto' | 'muse' | 'openai';
+  speechEnabled: boolean;
+}
 export interface SlideTranslationCommand {
+  manual?: boolean;
+  defaults?: TranslationDefaults;
   serviceId: string;
   serviceRevision: string;
   segmentId: string;
@@ -7,12 +14,15 @@ export interface SlideTranslationCommand {
 export interface SlideTranslationStatus {
   phase: 'idle' | 'preparing' | 'ready' | 'starting' | 'live' | 'stopping' | 'error';
   message?: string;
+  manual?: boolean;
 }
 export interface SlideAutomationBridge {
   version: 1;
   computerAudio?: boolean;
   onCommand(handler: (command: SlideTranslationCommand) => void): () => void;
   report(status: SlideTranslationStatus): void;
+  getDefaults?(): Promise<TranslationDefaults>;
+  returnToShow?(): Promise<void>;
   getInput(): Promise<{ id: string; label: string } | null>;
   saveInput(input: { id: string; label: string }): Promise<void>;
 }
@@ -36,7 +46,10 @@ export class SlideAutomation {
       disconnect(): void;
       report(status: SlideTranslationStatus): void;
     },
-  ) {}
+  ) {
+    const report = io.report;
+    io.report = (status) => report({ ...status, manual: this.desired?.manual === true });
+  }
 
   command(command: SlideTranslationCommand) {
     if (
@@ -47,6 +60,9 @@ export class SlideAutomation {
       !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(command.segmentId)
     )
       return;
+    // A manually started session continues across ordinary slide navigation.
+    // Explicit Stop (including ending Show) still stops this owned session.
+    if (this.owned && this.desired?.manual && !command.manual && command.phase !== 'idle') return;
     this.failure = undefined;
     this.desired = command;
     this.generation++;
