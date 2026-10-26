@@ -207,6 +207,7 @@ h2 {
 .caption-viewport {
   position: relative;
   overflow-y: auto;
+  overflow-anchor: none;
   overscroll-behavior: contain;
   height: clamp(250px, 44dvh, 560px);
   padding: 8px 12px 24px 0;

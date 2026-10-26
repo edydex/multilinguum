@@ -124,8 +124,10 @@ describe('bounded source-timed audio window', () => {
     await relay.createSession({ ...session, id: 'service-b' });
     await relay.publishChannel({ ...channel, translationProvider: 'openai-realtime' });
     await relay.publishAudio(channel.id, speech());
-    expect(relay.snapshot('service-b')).toEqual([]);
-    expect(published).toHaveLength(1);
+    expect(relay.snapshot('service-b')).toEqual([
+      expect.objectContaining({ timingBasis: 'output' }),
+    ]);
+    expect(published).toHaveLength(2);
   });
 
   it('does not expose empty, malformed or oversized audio as a playable clip', async () => {

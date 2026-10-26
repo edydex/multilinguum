@@ -1176,6 +1176,12 @@ describe('public Heritage client contract', () => {
       expect(response.statusCode).toBe(200);
       expect(response.headers['access-control-allow-origin']).toBe('*');
     }
+    expect((await server.inject({ url: '/client/heritage.js' })).headers['cache-control']).toBe(
+      'no-store',
+    );
+    expect(
+      (await server.inject({ url: '/client/livekit-client.esm-123.js' })).headers['cache-control'],
+    ).toContain('immutable');
     for (const url of [
       '/client/missing.js',
       '/client/private.env',

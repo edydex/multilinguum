@@ -56,6 +56,7 @@ export class MuseLiveTranscriber implements Transcriber {
   #closed: Promise<void> | undefined;
   #finishClose: (() => void) | undefined;
   #failure: Error | undefined;
+  #prepared = false;
 
   constructor(apiKey: string, options: MuseOptions = {}) {
     this.#apiKey = apiKey;
@@ -78,6 +79,13 @@ export class MuseLiveTranscriber implements Transcriber {
         .slice(0, 64)
         .map((value) => value.slice(0, 60));
       await this.#connect();
+      // Muse requires continuous real-time input after acknowledgement. Validate
+      // access during prewarm, then close the idle stream without sending audio.
+      // The first real frame opens a fresh stream whose pacing starts at zero.
+      await this.#drain();
+      if (this.#failure) throw this.#failure;
+      this.#socket = undefined;
+      this.#prepared = true;
     } catch (error) {
       this.#socket?.terminate();
       this.#socket = undefined;
@@ -88,6 +96,7 @@ export class MuseLiveTranscriber implements Transcriber {
 
   async #connect(): Promise<void> {
     this.#draining = false;
+    this.#failure = undefined;
     this.#ready = false;
     this.#audioMs = 0;
     this.#epochStartMs = undefined;
@@ -111,6 +120,7 @@ export class MuseLiveTranscriber implements Transcriber {
         this.#options.handshakeMs ?? 15_000,
       );
       const fail = (message: string) => {
+        if (this.#socket !== socket) return;
         const error = new Error(message);
         if (!settled) {
           settled = true;
@@ -162,6 +172,7 @@ export class MuseLiveTranscriber implements Transcriber {
       });
       socket.on('error', () => fail('The secure connection to Muse failed.'));
       socket.on('close', (code) => {
+        if (this.#socket !== socket) return;
         this.#ready = false;
         if (!this.#draining || code !== 1000)
           fail('Muse disconnected before recognition finished. Reconnect capture to continue.');
@@ -172,7 +183,12 @@ export class MuseLiveTranscriber implements Transcriber {
   }
 
   async pushAudio(chunk: AudioChunk): Promise<void> {
-    if (!this.#session || !this.#ready || this.#failure)
+    if (!this.#session) throw new Error('Muse transcription is not ready.');
+    if (this.#prepared) {
+      this.#prepared = false;
+      await this.#connect();
+    }
+    if (!this.#ready || this.#failure)
       throw this.#failure ?? new Error('Muse transcription is not ready.');
     if (chunk.encoding !== 'pcm_s16le' || chunk.data.byteLength % 2 !== 0)
       throw new Error('Muse requires complete mono PCM16 samples.');
@@ -219,6 +235,7 @@ export class MuseLiveTranscriber implements Transcriber {
     } finally {
       this.#session = undefined;
       this.#socket = undefined;
+      this.#prepared = false;
       this.#ready = false;
     }
   }

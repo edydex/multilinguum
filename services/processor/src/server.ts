@@ -96,17 +96,12 @@ function publicState(
             language: channel.targetLanguage,
             channelId: channel.id,
             audioGeneration: relay.generation(channel.id),
-            bufferedAudioAvailable:
-              !channel.muted &&
-              channel.speechEnabled !== false &&
-              channel.translationProvider !== 'openai-realtime',
+            bufferedAudioAvailable: !channel.muted && channel.speechEnabled !== false,
+            audioTimingBasis:
+              channel.translationProvider === 'openai-realtime' ? 'output' : 'source',
             voiceMode: channel.voiceMode,
             available: !channel.muted,
-            audioAvailable:
-              !channel.muted &&
-              channel.speechEnabled !== false &&
-              (channel.translationProvider !== 'openai-realtime' ||
-                Boolean(config.LIVEKIT_URL && config.LIVEKIT_API_KEY && config.LIVEKIT_API_SECRET)),
+            audioAvailable: !channel.muted && channel.speechEnabled !== false,
             disclosure:
               channel.speechEnabled === false
                 ? 'Live text; audio is off'
@@ -547,6 +542,12 @@ export async function buildServer(config: ProcessorConfig) {
       session,
       realtimeTranscriberFactory(session),
       realtimeTranslationFactory,
+      () => {
+        // End capture once on a fatal source failure. Otherwise every incoming
+        // PCM frame repeats the same error and leaves the operator falsely live.
+        if (socket.readyState === socket.OPEN)
+          socket.close(1011, 'Speech recognition disconnected. Reconnect capture to continue.');
+      },
     );
     let startupError: Error | undefined;
     const ready = pipeline.start().catch((error) => {

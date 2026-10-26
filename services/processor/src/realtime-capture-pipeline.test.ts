@@ -157,6 +157,37 @@ function cascadeSession(): ServiceSession {
 describe('RealtimeCapturePipeline', () => {
   afterEach(() => vi.useRealTimers());
 
+  it('ends capture once when recognition fails instead of reporting every audio frame', async () => {
+    const session = liveSession();
+    session.targets = session.targets.map((target) => ({ ...target, speechEnabled: false }));
+    const reportChannelFailure = vi.fn();
+    const engine = { ingestSourceAudio: vi.fn(), reportChannelFailure } as unknown as SessionEngine;
+    const transcriber = new FakeTranscriber();
+    const failure = new Error('Recognition disconnected');
+    let signalFailure: (error: Error) => void = () => undefined;
+    transcriber.onError = (listener) => {
+      signalFailure = listener;
+      return () => undefined;
+    };
+    const disconnect = vi.fn();
+    const pipeline = new RealtimeCapturePipeline(
+      engine,
+      session,
+      transcriber,
+      () => new FakeTranslationChannel(),
+      disconnect,
+    );
+    await pipeline.start();
+    pipeline.push(new Uint8Array(960));
+    signalFailure(failure);
+    signalFailure(failure);
+    expect(() => pipeline.push(new Uint8Array(960))).toThrow('Recognition disconnected');
+    await pipeline.close();
+    expect(transcriber.pushed).toHaveLength(0);
+    expect(disconnect).toHaveBeenCalledExactlyOnceWith(failure);
+    expect(reportChannelFailure).toHaveBeenCalledTimes(1);
+  });
+
   it.each([485, 5485])(
     'preserves a subsecond source tail when stopping after %s ms',
     async (durationMs) => {
@@ -186,7 +217,7 @@ describe('RealtimeCapturePipeline', () => {
     },
   );
 
-  it('uses only the shared transcriber when translated speech is disabled', async () => {
+  it('keeps continuous translation enabled for captions when translated speech is disabled', async () => {
     const session = liveSession();
     session.targets = session.targets.map((target) => ({ ...target, speechEnabled: false }));
     const createDirect = vi.fn(() => new FakeTranslationChannel());
@@ -199,7 +230,7 @@ describe('RealtimeCapturePipeline', () => {
     await pipeline.start();
     pipeline.push(new Uint8Array(960));
     await pipeline.close();
-    expect(createDirect).not.toHaveBeenCalled();
+    expect(createDirect).toHaveBeenCalledOnce();
     expect(transcriber.pushed).toHaveLength(1);
   });
 
@@ -311,7 +342,7 @@ describe('RealtimeCapturePipeline', () => {
       channelId: 'channel-en',
       language: 'en',
       delta: 'you and peace.',
-      sourceElapsedMs: 1_600,
+      sourceElapsedMs: 5_600,
       receivedAtUnixMs: Date.now(),
     });
     translation.emitAudio({
@@ -341,12 +372,13 @@ describe('RealtimeCapturePipeline', () => {
       expect.any(Set),
     ]);
     expect(translatedTranscripts).toEqual([
+      ['channel-en', expect.objectContaining({ text: 'Grace to', final: false, revision: 1 })],
       [
         'channel-en',
         expect.objectContaining({
           text: 'Grace to you and peace.',
           sourceStartMs: 1_200,
-          sourceEndMs: 1_600,
+          sourceEndMs: 5_600,
           sequence: 0,
         }),
       ],

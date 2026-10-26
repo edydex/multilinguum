@@ -120,3 +120,24 @@ describe('source-timed listener playback', () => {
     expect(f.play).toHaveBeenCalledTimes(1);
   });
 });
+
+it('schedules consecutive realtime packets without waiting for the prior onended', async () => {
+  const f = fixture(false);
+  f.setNow(10000);
+  const packets = [clip('a', 1), clip('b', 2)].map((value) => ({
+    ...value,
+    timingBasis: 'output' as const,
+  }));
+  await f.player.tick(packets);
+  await f.player.tick(packets);
+  await f.player.tick(packets);
+  expect(f.play.mock.calls.map(([delay]) => delay)).toEqual([50, 1050]);
+  f.player.stop();
+  expect(f.stopSound).toHaveBeenCalled();
+});
+
+it('never matches realtime output-clock audio to a source video timestamp', async () => {
+  const f = fixture(true);
+  await f.player.tick([{ ...clip(), timingBasis: 'output' }]);
+  expect(f.load).not.toHaveBeenCalled();
+});

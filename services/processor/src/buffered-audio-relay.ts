@@ -117,9 +117,7 @@ export class BufferedAudioRelay implements MediaRelay {
     const session = this.#session;
     const channel = this.#channels.get(channelId);
     const startedAt = Date.parse(session?.startedAt ?? '');
-    // The legacy direct Realtime adapter exposes an output clock, not a verified
-    // source clock. Keep its existing relay; do not pretend its chunks align.
-    if (!session || !channel || channel.translationProvider === 'openai-realtime') return;
+    if (!session || !channel) return;
     if (chunk.encoding !== 'pcm_s16le' || !chunk.data.byteLength) return;
     if (!Number.isFinite(startedAt) || !Number.isFinite(chunk.startMs) || chunk.startMs < 0) return;
     if (!Number.isFinite(chunk.endMs) || chunk.endMs < chunk.startMs) return;
@@ -160,6 +158,9 @@ export class BufferedAudioRelay implements MediaRelay {
       channelId,
       language: channel.targetLanguage,
       generation: this.generation(channelId),
+      ...(channel.translationProvider === 'openai-realtime'
+        ? { timingBasis: 'output' as const }
+        : {}),
       sequence: chunk.sequence,
       sourceStartAtUnixMs: chunk.sourceStartAtUnixMs ?? startedAt + chunk.startMs,
       sourceEndAtUnixMs: chunk.sourceEndAtUnixMs ?? startedAt + chunk.endMs,

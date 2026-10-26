@@ -78,6 +78,7 @@ export function LiveExperience({
             item.audioAvailable !== false &&
             (!videoId ||
               (item.voiceMode !== 'source' &&
+                item.audioTimingBasis !== 'output' &&
                 item.bufferedAudioAvailable &&
                 videoPlaying &&
                 !needsAlignment)),

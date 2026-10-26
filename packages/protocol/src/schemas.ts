@@ -17,6 +17,7 @@ export const channelConfigSchema = z
     translationProvider: providerKindSchema,
     voiceMode: voiceModeSchema,
     voiceProfileId: z.string().min(1).optional(),
+    speechVoice: z.enum(['cedar', 'marin']).optional(),
     fallbackOrder: z.array(z.enum(['natural', 'cloned', 'mute'])).min(1),
     muted: z.boolean(),
     speechEnabled: z.boolean().default(true),

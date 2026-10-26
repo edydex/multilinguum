@@ -38,6 +38,7 @@ export interface TranslationContext {
 }
 
 export interface SpeechRenderContext {
+  speechVoice?: 'cedar' | 'marin';
   recordUsage?: (usage: ProviderUsage) => void;
   signal?: AbortSignal;
   /** Audio already queued or being rendered ahead of this clause. */

@@ -177,7 +177,27 @@ export function useAudioMeter(
           noiseSuppression: false,
           autoGainControl: false,
         };
-        stream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+        if (selectedDeviceId === 'syncshow:computer-audio') {
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: true,
+            audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+          });
+          // Video is never used or transmitted. Stop it immediately after permission grants the audio track.
+          stream.getVideoTracks().forEach((track) => {
+            track.stop();
+            stream!.removeTrack(track);
+          });
+          if (!stream.getAudioTracks().length)
+            throw new Error(
+              'Computer audio was not granted. Allow System Audio Recording for SyncShow in macOS Settings, then reconnect.',
+            );
+        } else stream = await navigator.mediaDevices.getUserMedia({ audio: constraints });
+        stream.getAudioTracks().forEach((track) =>
+          track.addEventListener('ended', () => {
+            if (!cancelled)
+              setError('The selected audio source stopped. Reconnect it before continuing.');
+          }),
+        );
         if (cancelled) {
           stream.getTracks().forEach((track) => track.stop());
           return;
